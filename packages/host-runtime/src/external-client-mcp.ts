@@ -127,6 +127,10 @@ const TOOLS: Tool[] = [
         cwd: string("Absolute workspace path; required with worktree"),
         worktree: string("New Git branch; create an isolated checkout on this Host"),
         base: string("Git ref for worktree; requires worktree, defaults to source HEAD"),
+        includeUncommitted: {
+          type: "boolean",
+          description: "Snapshot tracked uncommitted edits into the worktree baseline",
+        },
         scope: {
           type: "array",
           items: { type: "string" },
@@ -154,6 +158,11 @@ const TOOLS: Tool[] = [
         },
         watch: { type: "boolean", description: "Record an event when the Thread stops" },
         watchTimeoutMs: { ...integer("How long to watch; default 29 minutes"), minimum: 1 },
+        autoVerify: {
+          type: "boolean",
+          description:
+            "With watch=true, automatically run thread_verify on completion and embed the verdict in the watch notice",
+        },
       },
       required: ["task"],
     },
@@ -171,12 +180,14 @@ const TOOLS: Tool[] = [
           "refs",
           "worktree",
           "base",
+          "includeUncommitted",
           "scope",
           "checks",
           "acceptance",
           "allowNestedDelegation",
           "watch",
           "watchTimeoutMs",
+          "autoVerify",
         ]),
         ...(args.model !== undefined ? { model: { id: text(args, "model") } } : {}),
         ...(args.thinking !== undefined ? { thinkingOptionId: text(args, "thinking") } : {}),
@@ -393,6 +404,11 @@ const TOOLS: Tool[] = [
         },
         watch: { type: "boolean", description: "Record an event when the Thread stops" },
         watchTimeoutMs: { ...integer("How long to watch; default 29 minutes"), minimum: 1 },
+        autoVerify: {
+          type: "boolean",
+          description:
+            "With watch=true, automatically run thread_verify on completion and embed the verdict in the watch notice",
+        },
       },
       required: ["thread", "message"],
     },
@@ -401,7 +417,7 @@ const TOOLS: Tool[] = [
       body: {
         threadId: threadId(args),
         message: text(args, "message", true),
-        ...pick(args, ["interrupt", "steer", "watch", "watchTimeoutMs"]),
+        ...pick(args, ["interrupt", "steer", "watch", "watchTimeoutMs", "autoVerify"]),
       },
     }),
   },
@@ -438,7 +454,15 @@ const TOOLS: Tool[] = [
     description: "Record one event for this client when the Thread stops or the watch expires.",
     inputSchema: {
       type: "object",
-      properties: { thread, timeoutMs: integer("Default 29 minutes") },
+      properties: {
+        thread,
+        timeoutMs: integer("Default 29 minutes"),
+        autoVerify: {
+          type: "boolean",
+          description:
+            "Automatically run thread_verify on completion and include the verdict in the watch event note",
+        },
+      },
       required: ["thread"],
     },
     call: (args) => ({
@@ -447,6 +471,7 @@ const TOOLS: Tool[] = [
         threadId: threadId(args),
         timeoutMs:
           bounded(args, "timeoutMs", DEFAULT_WATCH_TIMEOUT_MS, Number.MAX_SAFE_INTEGER) || 1,
+        ...pick(args, ["autoVerify"]),
       },
     }),
   },
@@ -456,6 +481,52 @@ const TOOLS: Tool[] = [
       "List watches that have not been delivered yet, including taskName (last known title), threadStatus (current status, omitted if unreadable) and watchedForMs (elapsed time including Host downtime).",
     inputSchema: { type: "object", properties: {} },
     call: () => ({ route: "/v1/thread/watches", body: {} }),
+  },
+  {
+    name: "thread_verify",
+    description:
+      "Run declared checks in a finished governed Thread's workspace/worktree, collect its binary patch relative to baseline, audit out-of-scope file edits, and return the verification verdict.",
+    inputSchema: {
+      type: "object",
+      properties: { thread },
+      required: ["thread"],
+    },
+    call: (args) => ({ route: "/v1/thread/verify", body: { threadId: threadId(args) } }),
+  },
+  {
+    name: "thread_apply",
+    description:
+      "Apply a completed governed worktree Thread's patch unstaged to its source repository, then remove the worktree and branch and release its scope lock. Out-of-scope edits require allowOutOfScope=true; failed checks require force=true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        thread,
+        allowOutOfScope: {
+          type: "boolean",
+          description: "Allow applying changes that touched files outside the declared scope",
+        },
+        force: {
+          type: "boolean",
+          description: "Allow applying even when checks failed or the Thread ended non-completed",
+        },
+      },
+      required: ["thread"],
+    },
+    call: (args) => ({
+      route: "/v1/thread/apply",
+      body: { threadId: threadId(args), ...pick(args, ["allowOutOfScope", "force"]) },
+    }),
+  },
+  {
+    name: "thread_discard",
+    description:
+      "Discard a finished governed Thread's worktree and branch and release its write-scope lock.",
+    inputSchema: {
+      type: "object",
+      properties: { thread },
+      required: ["thread"],
+    },
+    call: (args) => ({ route: "/v1/thread/discard", body: { threadId: threadId(args) } }),
   },
   {
     name: "events_poll",

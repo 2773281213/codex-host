@@ -122,7 +122,7 @@ Rarely needed: debugging only. Exports the full Thread to a JSON file and return
 
 ## MCP
 
-外部监听在 `/mcp` 以 Streamable HTTP 提供 MCP：每个 POST 携带一条 JSON-RPC 消息并以 JSON 应答；`GET` 返回 405（不提供服务端主动流，推送用 `/v1/events`），`DELETE` 视为结束会话。工具与 CLI 一一对应：`harness_list`、`harness_inspect`、`host_info`、`project_list`、`delegate_start`、`thread_read`、`thread_export`、`thread_file_read`、`thread_wait`（最多 60 秒）、`thread_list`、`thread_send`、`thread_cancel`、`thread_watch`、`thread_watches`、`events_poll`。工具结果同时以文本和 `structuredContent` 返回 CLI 的 JSON；委派错误作为 `isError` 结果返回相同的错误代码。实现不依赖 MCP SDK。
+外部监听在 `/mcp` 以 Streamable HTTP 提供 MCP：每个 POST 携带一条 JSON-RPC 消息并以 JSON 应答；`GET` 返回 405（不提供服务端主动流，推送用 `/v1/events`），`DELETE` 视为结束会话。工具与 CLI 一一对应：`harness_list`、`harness_inspect`、`host_info`、`project_list`、`delegate_start`、`delegate_routing`、`thread_read`、`thread_export`、`thread_file_read`、`thread_wait`（最多 60 秒）、`thread_list`、`thread_send`、`thread_answer`、`thread_cancel`、`thread_watch`、`thread_watches`、`thread_verify`、`thread_apply`、`thread_discard`、`thread_keepalive`、`events_poll`。工具结果同时以文本和 `structuredContent` 返回 CLI 的 JSON；委派错误作为 `isError` 结果返回相同的错误代码。实现不依赖 MCP SDK。
 
 ### 设备与项目发现
 

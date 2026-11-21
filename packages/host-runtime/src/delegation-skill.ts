@@ -3,7 +3,7 @@ import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-const SKILL_VERSION = 15;
+const SKILL_VERSION = 16;
 export const DELEGATION_SKILL_NAME = "codexhost-delegation";
 const SKILL_RELATIVE_PATH = path.join("skills", DELEGATION_SKILL_NAME, "SKILL.md");
 const PREVIOUS_MANAGED_DIGESTS: readonly string[] = [
@@ -35,6 +35,8 @@ const PREVIOUS_MANAGED_DIGESTS: readonly string[] = [
   "75eb0ea22c8e3ce875a62133c10d62fedacf381e25202d01688210dd951324c1",
   // Fork v13, before the content split with CLI help.
   "41c2672e34b7a52dee9111f8284a4261b4dbcd42908262dcc814b323bb278e59",
+  // v15, before tiered routing, scope locks, and worktree verify/apply/discard.
+  "1ff56f80948aae392c908ae87e7c3763d329c60fd305c4b1f1a29cf32b8f93a3",
 ];
 
 export const CODEXHOST_DELEGATION_SKILL = `---
@@ -79,19 +81,29 @@ Use the Harness native defaults unless a Model or Thinking selection is needed.
 
 For a new delegation, create an independent child session and submit the
 requested task. Give it a short task name that tells it apart from sibling
-tasks. When the change is large, or parallel tasks may touch the same files, an
-isolated git worktree for the child is an option. For an existing external
-session, resolve the target from the user-provided session link, identifier, or
-context and operate on that Thread directly; it need not have been created by
-the current assistant. If the target is ambiguous, ask the user to identify it.
+tasks. When splitting work by complexity or cost, inspect \`delegate routing show\`
+and pass \`--tier deep|light|review\` (with disjoint \`--scope\` paths for
+concurrent write tasks, \`--check\` commands for verification, and \`--worktree\`
+plus optional \`--include-uncommitted true\` for isolated Git execution). When the
+change is large, or parallel tasks may touch the same files, an isolated git
+worktree for the child is an option. For an existing external session, resolve
+the target from the user-provided session link, identifier, or context and
+operate on that Thread directly; it need not have been created by the current
+assistant. If the target is ambiguous, ask the user to identify it.
 Keep requests to view or summarize a session read-only.
+
+Do not delegate recursively when running as a governed executor
+(\`CODEXHOST_DELEGATION_ROLE=executor\`).
 
 Then choose the next action from the user's request: send a follow-up, cancel,
 read now, answer a pending question, wait for a bounded period, check later, or
 watch it so the Host notifies this Thread once when it stops or needs input.
 You can also leave it running. A watch notification
 reports execution state only; read the Thread before judging or reporting its
-work. Only when debugging needs the full Thread, export it to a file.
+work. For governed worktree tasks, run \`thread verify <thread>\` (or pass \`--auto-verify true\` with \`--watch true\`) to run checks
+and audit out-of-scope edits, then \`thread apply <thread>\` (unstaged into the
+source working tree) or \`thread discard <thread>\` to clean up and release its
+scope lock. Only when debugging needs the full Thread, export it to a file.
 
 For a pending question, read the Thread and follow the answer command's help.
 After answering, read or watch again; submission does not prove completion.
