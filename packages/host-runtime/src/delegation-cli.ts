@@ -484,6 +484,7 @@ export async function runDelegationCli(input: {
         "--cwd",
         "--worktree",
         "--base",
+        "--include-uncommitted",
         "--allow-nested-delegation",
         "--model",
         "--thinking",
@@ -491,6 +492,7 @@ export async function runDelegationCli(input: {
         "--request-id",
         "--watch",
         "--watch-timeout-ms",
+        "--auto-verify",
         "--ref",
       ]);
       if (parsed.positionals.length > 0)
@@ -520,6 +522,24 @@ export async function runDelegationCli(input: {
           "INVALID_ARGUMENT",
           "--watch-timeout-ms requires --watch true",
         );
+      const autoVerify = value(parsed, "--auto-verify");
+      if (autoVerify !== undefined && autoVerify !== "true" && autoVerify !== "false")
+        throw new DelegationControlError("INVALID_ARGUMENT", "--auto-verify must be true or false");
+      if (watch !== "true" && autoVerify === "true")
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "--auto-verify true requires --watch true",
+        );
+      const includeUncommitted = value(parsed, "--include-uncommitted");
+      if (
+        includeUncommitted !== undefined &&
+        includeUncommitted !== "true" &&
+        includeUncommitted !== "false"
+      )
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "--include-uncommitted must be true or false",
+        );
       const allowNested = value(parsed, "--allow-nested-delegation");
       if (allowNested !== undefined && allowNested !== "true" && allowNested !== "false")
         throw new DelegationControlError(
@@ -537,6 +557,7 @@ export async function runDelegationCli(input: {
         scopes?.length ||
         checks?.length ||
         acceptance !== undefined ||
+        includeUncommitted === "true" ||
         allowNested !== undefined,
       );
       const sourceCwd =
@@ -571,6 +592,7 @@ export async function runDelegationCli(input: {
               watchTimeoutMs: value(parsed, "--watch-timeout-ms")
                 ? positiveInteger(value(parsed, "--watch-timeout-ms"), "--watch-timeout-ms")
                 : DEFAULT_WATCH_TIMEOUT_MS,
+              ...(autoVerify === "true" ? { autoVerify: true } : {}),
             }
           : {}),
       };
@@ -578,15 +600,20 @@ export async function runDelegationCli(input: {
         "delegate start",
         await startWithDelegationWorktree(
           {
-            cwd: body.cwd ?? (value(parsed, "--worktree") ? process.cwd() : undefined),
+            cwd: sourceCwd,
             branch: value(parsed, "--worktree"),
             base: value(parsed, "--base"),
+            includeUncommitted: includeUncommitted === "true",
           },
-          (cwd) =>
+          (cwd, createdWorktree) =>
             requestRuntime({
               environment,
               path: "/v1/delegate/start",
-              body: { ...body, ...(cwd ? { cwd } : {}) },
+              body: {
+                ...body,
+                ...(cwd ? { cwd } : {}),
+                ...(governedFlags && createdWorktree ? { worktreeMetadata: createdWorktree } : {}),
+              },
               ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
             }),
         ),
@@ -601,6 +628,7 @@ export async function runDelegationCli(input: {
         "--steer",
         "--watch",
         "--watch-timeout-ms",
+        "--auto-verify",
       ]);
       if (parsed.positionals.length !== 1) {
         throw new DelegationControlError(
@@ -635,6 +663,14 @@ export async function runDelegationCli(input: {
           "INVALID_ARGUMENT",
           "--watch-timeout-ms requires --watch true",
         );
+      const sendAutoVerify = value(parsed, "--auto-verify");
+      if (sendAutoVerify !== undefined && sendAutoVerify !== "true" && sendAutoVerify !== "false")
+        throw new DelegationControlError("INVALID_ARGUMENT", "--auto-verify must be true or false");
+      if (watch !== "true" && sendAutoVerify === "true")
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "--auto-verify true requires --watch true",
+        );
       const parentThread = callerThreadId(environment);
       writeResult(
         "thread send",
@@ -652,6 +688,7 @@ export async function runDelegationCli(input: {
                   watchTimeoutMs: value(parsed, "--watch-timeout-ms")
                     ? positiveInteger(value(parsed, "--watch-timeout-ms"), "--watch-timeout-ms")
                     : DEFAULT_WATCH_TIMEOUT_MS,
+                  ...(sendAutoVerify === "true" ? { autoVerify: true } : {}),
                 }
               : {}),
           },
@@ -815,7 +852,7 @@ export async function runDelegationCli(input: {
       return 0;
     }
     if (group === "thread" && command === "watch") {
-      rejectUnknown(parsed, ["--notify", "--timeout-ms"]);
+      rejectUnknown(parsed, ["--notify", "--timeout-ms", "--auto-verify"]);
       if (parsed.positionals.length !== 1)
         throw new DelegationControlError(
           "INVALID_ARGUMENT",
@@ -824,6 +861,13 @@ export async function runDelegationCli(input: {
       const threadId = parsed.positionals[0];
       if (!threadId)
         throw new DelegationControlError("INVALID_ARGUMENT", "Thread identifier is required");
+      const watchAutoVerify = value(parsed, "--auto-verify");
+      if (
+        watchAutoVerify !== undefined &&
+        watchAutoVerify !== "true" &&
+        watchAutoVerify !== "false"
+      )
+        throw new DelegationControlError("INVALID_ARGUMENT", "--auto-verify must be true or false");
       const notifyThread = value(parsed, "--notify") ?? callerThreadId(environment);
       // An external client is notified itself; the Runtime fills that in.
       const external = await usesExternalClient(environment);
@@ -843,6 +887,7 @@ export async function runDelegationCli(input: {
             timeoutMs: value(parsed, "--timeout-ms")
               ? positiveInteger(value(parsed, "--timeout-ms"), "--timeout-ms")
               : DEFAULT_WATCH_TIMEOUT_MS,
+            ...(watchAutoVerify === "true" ? { autoVerify: true } : {}),
           },
           ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
         }),
@@ -862,6 +907,82 @@ export async function runDelegationCli(input: {
           environment,
           path: "/v1/thread/watches",
           body: {},
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+        }),
+      );
+      return 0;
+    }
+    if (group === "thread" && command === "verify") {
+      rejectUnknown(parsed, []);
+      const threadId = parsed.positionals[0];
+      if (parsed.positionals.length !== 1 || !threadId)
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "thread verify requires one Thread identifier",
+        );
+      writeResult(
+        "thread verify",
+        await requestRuntime({
+          environment,
+          path: "/v1/thread/verify",
+          body: { threadId: normalizeThreadId(threadId) },
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+        }),
+      );
+      return 0;
+    }
+    if (group === "thread" && command === "apply") {
+      rejectUnknown(parsed, ["--allow-out-of-scope", "--force"]);
+      const threadId = parsed.positionals[0];
+      if (parsed.positionals.length !== 1 || !threadId)
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "thread apply requires one Thread identifier",
+        );
+      const allowOutOfScope = value(parsed, "--allow-out-of-scope");
+      if (
+        allowOutOfScope !== undefined &&
+        allowOutOfScope !== "true" &&
+        allowOutOfScope !== "false"
+      )
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "--allow-out-of-scope must be true or false",
+        );
+      const force = value(parsed, "--force");
+      if (force !== undefined && force !== "true" && force !== "false")
+        throw new DelegationControlError("INVALID_ARGUMENT", "--force must be true or false");
+      writeResult(
+        "thread apply",
+        await requestRuntime({
+          environment,
+          path: "/v1/thread/apply",
+          body: {
+            threadId: normalizeThreadId(threadId),
+            ...(allowOutOfScope !== undefined
+              ? { allowOutOfScope: allowOutOfScope === "true" }
+              : {}),
+            ...(force !== undefined ? { force: force === "true" } : {}),
+          },
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+        }),
+      );
+      return 0;
+    }
+    if (group === "thread" && command === "discard") {
+      rejectUnknown(parsed, []);
+      const threadId = parsed.positionals[0];
+      if (parsed.positionals.length !== 1 || !threadId)
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "thread discard requires one Thread identifier",
+        );
+      writeResult(
+        "thread discard",
+        await requestRuntime({
+          environment,
+          path: "/v1/thread/discard",
+          body: { threadId: normalizeThreadId(threadId) },
           ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
         }),
       );

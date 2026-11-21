@@ -1,7 +1,13 @@
 import type { DelegationTier } from "@codexhost/shared-contracts";
+import type { DelegationCheckResult, DelegationVerificationStatus } from "./delegation-checks.js";
 import type { DelegationIntegrationState } from "./delegation-governance-store.js";
 import type { DelegationRoutingConfig } from "./delegation-routing.js";
 import type { ThreadExportInput, ThreadExportResult } from "./delegation-thread-export.js";
+import type {
+  ThreadApplyResult,
+  ThreadDiscardResult,
+  ThreadVerifyResult,
+} from "./delegation-worktree-lifecycle.js";
 import type { DelegationWorktree } from "./delegation-worktree.js";
 import type { JsonObject, JsonValue, RoutedHarnessId } from "@codexhost/protocol-core";
 import type {
@@ -84,6 +90,12 @@ export interface DelegationGovernanceSummary {
   scope: string[];
   checks: string[];
   integration: DelegationIntegrationState;
+  verification?: DelegationVerificationStatus;
+  checkResults?: DelegationCheckResult[];
+  changedFiles?: string[];
+  outOfScope?: string[];
+  patchPath?: string;
+  patchStat?: string;
   warnings?: string[];
 }
 
@@ -304,6 +316,8 @@ export interface ThreadWatchInput {
   /** Thread that receives the single notification. */
   notifyThreadId: string;
   timeoutMs: number;
+  /** Run `thread verify` automatically on completion and embed the verdict in the notice. */
+  autoVerify?: boolean;
 }
 
 export type ThreadWatchOutcome =
@@ -350,6 +364,8 @@ export interface ThreadWatchEntry {
   threadStatus?: DelegationThreadStatus;
   /** Elapsed time since registration, including Host downtime. */
   watchedForMs?: number;
+  /** True when the watch automatically runs `thread verify` upon completion. */
+  autoVerify?: boolean;
 }
 
 export interface ThreadWatchListResult {
@@ -387,11 +403,28 @@ export interface DelegationRoutingMutateResult {
   routing: DelegationRoutingConfig;
 }
 
-/** Optional governance API: tiered routing profiles (extended in later PRs with verify/apply/discard). */
+export interface ThreadVerifyInput {
+  threadId: string;
+}
+
+export interface ThreadApplyInput {
+  threadId: string;
+  allowOutOfScope?: boolean;
+  force?: boolean;
+}
+
+export interface ThreadDiscardInput {
+  threadId: string;
+}
+
+/** Optional governance API: tiered routing profiles, verification checks, and worktree apply/discard. */
 export interface DelegationGovernanceApi {
   routingShow(input?: DelegationRoutingShowInput): Promise<DelegationRoutingConfig>;
   routingSet(input: DelegationRoutingMutateInput): Promise<DelegationRoutingMutateResult>;
   routingUnset(input: DelegationRoutingMutateInput): Promise<DelegationRoutingMutateResult>;
+  verifyThread(input: ThreadVerifyInput): Promise<ThreadVerifyResult>;
+  applyThread(input: ThreadApplyInput): Promise<ThreadApplyResult>;
+  discardThread(input: ThreadDiscardInput): Promise<ThreadDiscardResult>;
 }
 
 export interface DelegationControlApi {
@@ -438,6 +471,14 @@ export type DelegationControlErrorCode =
   | "SCOPE_CONFLICT"
   /** A governed executor Thread attempted to recursively delegate further work. */
   | "EXECUTOR_ROLE_FORBIDDEN"
+  /** A delegated Thread modified files outside its declared scope. */
+  | "OUT_OF_SCOPE"
+  /** One or more declared verification checks failed or the delegated Thread did not complete cleanly. */
+  | "CHECKS_FAILED"
+  /** Applying a delegated worktree patch conflicted with the current working tree. */
+  | "APPLY_CONFLICT"
+  /** The delegated Thread's changes were already applied or discarded. */
+  | "ALREADY_INTEGRATED"
   | "INTERNAL_ERROR";
 
 export class DelegationControlError extends Error {

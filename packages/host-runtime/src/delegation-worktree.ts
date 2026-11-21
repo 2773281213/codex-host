@@ -6,12 +6,19 @@ import { promisify } from "node:util";
 import { DelegationControlError } from "./delegation-types.js";
 
 const execFileAsync = promisify(execFile);
+const MAX_UNTRACKED_LISTED = 20;
 
 export interface DelegationWorktree {
   path: string;
   branch: string;
   /** Resolved commit, including when the caller omitted --base (HEAD). */
   base: string;
+  /** Present when includeUncommitted=true snapshotted uncommitted tracked edits via `git stash create`. */
+  includesUncommitted?: boolean;
+  /** Count of untracked files in the source repo (excluded from git snapshots). */
+  untrackedCount?: number;
+  /** Up to 20 sample untracked file paths, present only when includeUncommitted=true and untracked files exist. */
+  untracked?: string[];
 }
 
 /** Resolves the Git repository top-level directory containing `cwd`, or null if outside Git. */
@@ -78,6 +85,7 @@ async function createWorktree(input: {
   cwd: string;
   branch: string;
   base?: string | undefined;
+  includeUncommitted?: boolean | undefined;
 }): Promise<DelegationWorktree> {
   const root = await checkRepository(input.cwd);
   // Validate the literal ref: --branch would expand checkout shorthand such as @{-1}.
@@ -93,15 +101,37 @@ async function createWorktree(input: {
     throw invalid(`Git branch already exists: ${input.branch}`);
 
   let base: string;
-  try {
-    base = await git(root, [
-      "rev-parse",
-      "--verify",
-      "--end-of-options",
-      `${input.base ?? "HEAD"}^{commit}`,
-    ]);
-  } catch {
-    throw invalid(`Cannot resolve worktree base to a commit: ${input.base ?? "HEAD"}`);
+  let includesUncommitted: boolean | undefined;
+  let untrackedCount: number | undefined;
+  let untracked: string[] | undefined;
+  if (input.includeUncommitted) {
+    if (input.base !== undefined) {
+      throw invalid("--include-uncommitted cannot be combined with --base");
+    }
+    let headCommit: string;
+    try {
+      headCommit = await git(root, ["rev-parse", "--verify", "HEAD^{commit}"]);
+    } catch {
+      throw invalid("Cannot resolve HEAD commit for worktree snapshot");
+    }
+    const snapshot = await git(root, ["stash", "create"]);
+    base = snapshot || headCommit;
+    includesUncommitted = snapshot !== "";
+    const untrackedRaw = await git(root, ["ls-files", "--others", "--exclude-standard", "-z"]);
+    const untrackedList = untrackedRaw.split("\0").filter(Boolean);
+    untrackedCount = untrackedList.length;
+    if (untrackedList.length > 0) untracked = untrackedList.slice(0, MAX_UNTRACKED_LISTED);
+  } else {
+    try {
+      base = await git(root, [
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        `${input.base ?? "HEAD"}^{commit}`,
+      ]);
+    } catch {
+      throw invalid(`Cannot resolve worktree base to a commit: ${input.base ?? "HEAD"}`);
+    }
   }
   // The first entry is the main working tree, even when cwd is a linked worktree.
   const listed = await git(root, ["worktree", "list", "--porcelain", "-z"]);
@@ -109,7 +139,14 @@ async function createWorktree(input: {
   if (!main || !path.isAbsolute(main)) throw invalid("Cannot determine the main Git worktree");
   const directory = input.branch.replace(/[^a-zA-Z0-9._-]/gu, "-");
   const parent = path.join(path.dirname(main), `${path.basename(main)}.worktrees`);
-  const worktree = { path: path.join(parent, directory), branch: input.branch, base };
+  const worktree: DelegationWorktree = {
+    path: path.join(parent, directory),
+    branch: input.branch,
+    base,
+    ...(includesUncommitted !== undefined ? { includesUncommitted } : {}),
+    ...(untrackedCount !== undefined ? { untrackedCount } : {}),
+    ...(untracked !== undefined ? { untracked } : {}),
+  };
   if (await exists(worktree.path))
     throw invalid(`Worktree directory already exists: ${worktree.path}`);
   await mkdir(parent, { recursive: true });
@@ -159,12 +196,18 @@ async function createWorktree(input: {
 
 /** Shared CLI/Host filesystem preparation; callers must resolve their own source cwd. */
 export async function startWithDelegationWorktree(
-  input: { cwd?: string | undefined; branch?: string | undefined; base?: string | undefined },
-  start: (cwd: string | undefined) => Promise<unknown>,
+  input: {
+    cwd?: string | undefined;
+    branch?: string | undefined;
+    base?: string | undefined;
+    includeUncommitted?: boolean | undefined;
+  },
+  start: (cwd: string | undefined, worktree?: DelegationWorktree) => Promise<unknown>,
 ): Promise<unknown> {
   if (input.branch === undefined) {
     if (input.base !== undefined) throw invalid("--base requires --worktree");
-    return start(input.cwd);
+    if (input.includeUncommitted) throw invalid("--include-uncommitted requires --worktree");
+    return start(input.cwd, undefined);
   }
   if (typeof input.branch !== "string" || !input.branch.trim())
     throw invalid("worktree must be a non-empty branch name");
@@ -176,9 +219,10 @@ export async function startWithDelegationWorktree(
     cwd: path.resolve(input.cwd),
     branch: input.branch,
     base: input.base,
+    includeUncommitted: input.includeUncommitted,
   });
   try {
-    const result = await start(worktree.path);
+    const result = await start(worktree.path, worktree);
     if (!result || typeof result !== "object" || Array.isArray(result))
       throw new DelegationControlError("INTERNAL_ERROR", "Invalid delegation start response");
     return { ...result, worktree };

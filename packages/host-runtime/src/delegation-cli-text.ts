@@ -70,6 +70,9 @@ export function assertDelegationTextCommand(command: string): void {
     case "thread wait":
     case "thread watch":
     case "thread watches":
+    case "thread verify":
+    case "thread apply":
+    case "thread discard":
     case "thread list":
       return;
     default:

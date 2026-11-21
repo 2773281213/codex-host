@@ -116,7 +116,9 @@ describe("delegation Skill installation", () => {
   });
 
   it("routes natural agent requests and points execution to the authoritative help", () => {
-    expect(CODEXHOST_DELEGATION_SKILL).toContain("version: 15");
+    expect(CODEXHOST_DELEGATION_SKILL).toContain("version: 16");
+    expect(CODEXHOST_DELEGATION_SKILL).toContain("--tier deep|light|review");
+    expect(CODEXHOST_DELEGATION_SKILL).toContain("thread verify <thread>");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("@agent) to independently perform a task");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("session's content, progress, or results");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("Not for recapping the current conversation");

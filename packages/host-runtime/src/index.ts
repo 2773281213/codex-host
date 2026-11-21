@@ -78,6 +78,33 @@ export {
   writeDelegationRoutingSetting,
 } from "./delegation-routing.js";
 export type { DelegationRoutingConfig, DelegationTierRoute } from "./delegation-routing.js";
+export {
+  CHECK_REDACTED,
+  CHECK_TIMEOUT_EXIT_CODE,
+  computeVerificationVerdict,
+  createStreamRedactor,
+  killCheckProcessTree,
+  redactSensitiveText,
+  runDelegationChecks,
+} from "./delegation-checks.js";
+export type {
+  DelegationCheckResult,
+  DelegationCheckStatus,
+  DelegationVerificationStatus,
+} from "./delegation-checks.js";
+export {
+  applyGovernedThread,
+  applyWorktreePatch,
+  collectWorktreeChanges,
+  discardGovernedThread,
+  removeWorktreeCheckout,
+  verifyGovernedThread,
+} from "./delegation-worktree-lifecycle.js";
+export type {
+  ThreadApplyResult,
+  ThreadDiscardResult,
+  ThreadVerifyResult,
+} from "./delegation-worktree-lifecycle.js";
 export { installDelegationSkills, CODEXHOST_DELEGATION_SKILL } from "./delegation-skill.js";
 export {
   DELEGATION_CLI_PATH_ENV,

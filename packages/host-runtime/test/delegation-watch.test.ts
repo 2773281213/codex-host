@@ -551,4 +551,63 @@ describe("DelegationWatchService", () => {
     expect(fake.sent).toHaveLength(1);
     await expect(service.watches()).resolves.toEqual({ watches: [] });
   });
+
+  it("runs autoVerify on completion and appends the verdict summary to the watch notice", async () => {
+    const fake = runtime({ child: { status: "running" }, parent: { status: "completed" } });
+    const verify = vi.fn(async (threadId: string) => ({
+      threadId,
+      status: "completed" as const,
+      integration: "none" as const,
+      verification: "passed" as const,
+      ok: true,
+      checks: [
+        {
+          command: "npm test",
+          status: "passed" as const,
+          exitCode: 0,
+          summary: "ok",
+          durationMs: 12,
+        },
+      ],
+      changedFiles: ["src/a.ts"],
+      outOfScope: [],
+      warnings: [],
+    }));
+    const service = new DelegationWatchService(fake, { pollIntervalMs: POLL_MS, verify });
+    await service.watch({
+      threadId: "child",
+      notifyThreadId: "parent",
+      timeoutMs: 60_000,
+      autoVerify: true,
+    });
+    fake.update("child", { status: "completed" });
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(verify).toHaveBeenCalledWith("child");
+    expect(fake.sent).toHaveLength(1);
+    expect(fake.sent[0]?.message).toContain(
+      "Auto-verify verdict: passed (1/1 checks passed; 1 changed file(s), 0 out of scope)",
+    );
+    expect(fake.sent[0]?.message).toContain("codexhost thread apply child");
+  });
+
+  it("delivers completion notice gracefully when autoVerify throws", async () => {
+    const fake = runtime({ child: { status: "running" }, parent: { status: "completed" } });
+    const verify = vi.fn(async () => {
+      throw new Error("no governed worktree recorded");
+    });
+    const service = new DelegationWatchService(fake, { pollIntervalMs: POLL_MS, verify });
+    await service.watch({
+      threadId: "child",
+      notifyThreadId: "parent",
+      timeoutMs: 60_000,
+      autoVerify: true,
+    });
+    fake.update("child", { status: "completed" });
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(verify).toHaveBeenCalledWith("child");
+    expect(fake.sent).toHaveLength(1);
+    expect(fake.sent[0]?.message).toContain(
+      "Auto-verify could not run: no governed worktree recorded",
+    );
+  });
 });

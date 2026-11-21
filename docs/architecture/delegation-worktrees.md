@@ -11,7 +11,7 @@ codexhost delegate start --harness pi --task "检查协议边界" \
 
 - CLI 源 checkout 使用 `--cwd`；相对路径按 CLI 进程当前目录解析。省略时使用 CLI 当前目录，不读取父 Thread 或 Runtime 的 cwd。CLI 在调用共用实现前解析为绝对路径。
 - HTTP / MCP 使用请求中的 `cwd` 作为源 checkout；使用 `worktree` 时必须显式传绝对路径，即使有父 Thread 也不继承目录。Host 拒绝相对路径或缺失 cwd，不按自身当前目录推断。
-- `--base <ref>` 仅与 `--worktree` 一起使用，默认是源 checkout 的当前 `HEAD`，包括 detached HEAD。先解析为提交 SHA，再从该提交创建分支；不会复制源目录的未提交修改，也不会推断远端默认分支或 fetch。
+- `--base <ref>` 仅与 `--worktree` 一起使用，默认是源 checkout 的当前 `HEAD`，包括 detached HEAD。先解析为提交 SHA，再从该提交创建分支；不会复制源目录的未提交修改，也不会推断远端默认分支或 fetch。若需要把源工作区已跟踪的未提交改动纳入基线，可传 `--include-uncommitted true`（与 `--base` 互斥），通过 `git stash create` 生成快照提交并报告未跟踪文件。
 - 位置固定为主仓库同级的 `<仓库名>.worktrees/<安全分支名>`。分支名中的非 ASCII 字母、数字、`.`、`_`、`-` 字符替换成 `-`，Git 分支名本身保持原样。例如 `/projects/app.worktrees/review-protocol`，分支为 `review/protocol`。
 - 从已有 linked worktree 或仓库子目录调用时，目录位置仍以主仓库为准，基线则取源 checkout。
 - CLI JSON / compact、HTTP 和 MCP 返回相同的 `worktree: {path, branch, base}`；`base` 为实际使用的提交 SHA。Host 控制路由创建 worktree 后，将有效 cwd 交给委派接口；CLI 本地创建后只向 Runtime 发送有效 cwd，不重复创建。
@@ -28,4 +28,4 @@ CLI 和 Host 不判断任务是否应该使用 worktree，不在正常响应中�
 
 Runtime 请求或 Host 委派失败时保留已创建的 worktree 和分支，并在错误中明确返回 `details.worktree` 与 `worktreeRetained: true`，保留原错误代码及其他 details。请求失败或响应丢失不能证明子 Thread 未启动，因此不删除可能正被使用的工作目录。watch 注册失败仍返回成功委派及 worktree，`watch` 中报告 `notRegistered`。
 
-成功创建的 worktree 不自动合并或清理，不安装依赖。清理由调用方在确认没有活动会话后显式进行。对已存在分支或目录的重试仍报重名错误；`--request-id` 不使 worktree 创建变成可复用操作。
+成功创建的 worktree 不自动合并或清理，不安装依赖。清理由调用方在确认没有活动会话后显式进行；受治理的 worktree 委派可通过 `thread verify`、`thread apply` 和 `thread discard` 完成检查、补丁落盘与分支/目录清理（见 [委派治理](delegation-governance.md)）。对已存在分支或目录的重试仍报重名错误；`--request-id` 不使 worktree 创建变成可复用操作。

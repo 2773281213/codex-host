@@ -122,6 +122,9 @@ export function compactDelegationOutput(
     case "thread export":
     case "harness list":
     case "delegate routing":
+    case "thread verify":
+    case "thread apply":
+    case "thread discard":
       return body;
     case "harness inspect":
       return inspectOutput(body as HarnessInspectResult);

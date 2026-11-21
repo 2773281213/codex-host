@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import type { DelegationCheckResult, DelegationVerificationStatus } from "./delegation-checks.js";
 import type { DelegationTier, ScopeHoldingRecord } from "./delegation-policy.js";
 import { renameSyncWithRetry } from "./delegation-routing.js";
 import type { DelegationThreadStatus } from "./delegation-types.js";
@@ -27,9 +28,18 @@ export interface DelegationGovernanceRecord extends ScopeHoldingRecord {
   worktree?: DelegationWorktree;
   status: DelegationThreadStatus | "verifying";
   integration: DelegationIntegrationState;
+  verification?: DelegationVerificationStatus;
+  checkResults?: DelegationCheckResult[];
+  changedFiles?: string[];
+  outOfScope?: string[];
+  patchPath?: string;
+  patchStat?: string;
   warnings: string[];
   createdAt: string;
   updatedAt: string;
+  verifiedAt?: string;
+  appliedAt?: string;
+  discardedAt?: string;
 }
 
 export function defaultDelegationGovernanceDirectory(

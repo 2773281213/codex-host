@@ -12,10 +12,13 @@ import {
   type HarnessInspectInput,
   type HarnessListInput,
   type ThreadAnswerInput,
+  type ThreadApplyInput,
   type ThreadCancelInput,
+  type ThreadDiscardInput,
   type ThreadListInput,
   type ThreadSendInput,
   type ThreadReadInput,
+  type ThreadVerifyInput,
   type ThreadWaitInput,
   type ThreadWatchInput,
 } from "./delegation-types.js";
@@ -24,7 +27,7 @@ import type { HostInventory } from "./host-inventory.js";
 import { validateThreadExportInput, type ThreadExportInput } from "./delegation-thread-export.js";
 import { readThreadResultFile } from "./thread-result-file.js";
 import { validateReadOptions } from "./delegation-snapshot.js";
-import { startWithDelegationWorktree } from "./delegation-worktree.js";
+import { resolveGitRepoRoot, startWithDelegationWorktree } from "./delegation-worktree.js";
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 
@@ -116,12 +119,13 @@ async function startWithWatch(
   watches: DelegationWatchApi,
   body: Record<string, unknown>,
 ): Promise<unknown> {
-  const { watchTimeoutMs, ...start } = body;
+  const { watchTimeoutMs, autoVerify, ...start } = body;
   const result = await api.start(start as unknown as DelegationStartInput);
   const watch = await watchStartedTurn(watches, {
     threadId: result.threadId,
     notifyThreadId: result.parentThreadId ?? "",
     timeoutMs: watchTimeoutMs as number,
+    ...(autoVerify === true ? { autoVerify: true } : {}),
   });
   return { ...result, watch };
 }
@@ -132,12 +136,13 @@ async function sendWithWatch(
   watches: DelegationWatchApi,
   body: Record<string, unknown>,
 ): Promise<unknown> {
-  const { watchTimeoutMs, notifyThreadId, ...send } = body;
+  const { watchTimeoutMs, notifyThreadId, autoVerify, ...send } = body;
   const result = await api.send(send as unknown as ThreadSendInput);
   const watch = await watchStartedTurn(watches, {
     threadId: result.threadId,
     notifyThreadId: (notifyThreadId ?? "") as string,
     timeoutMs: watchTimeoutMs as number,
+    ...(autoVerify === true ? { autoVerify: true } : {}),
   });
   return { ...result, watch };
 }
@@ -180,17 +185,41 @@ export async function routeDelegationRequest(
         body as unknown as DelegationRoutingMutateInput,
       );
     case "/v1/delegate/start": {
-      const { worktree, base, ...start } = body;
+      const { worktree, base, includeUncommitted, ...start } = body;
+      if (includeUncommitted !== undefined && typeof includeUncommitted !== "boolean") {
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "includeUncommitted must be a boolean",
+        );
+      }
+      const sourceCwd = typeof start.cwd === "string" ? start.cwd : undefined;
+      const attachGovernanceWorktree = Boolean(
+        handlers.governanceApi ||
+        start.tier !== undefined ||
+        start.scope !== undefined ||
+        start.checks !== undefined ||
+        start.acceptance !== undefined ||
+        includeUncommitted === true,
+      );
+      const sourceRepoRoot =
+        attachGovernanceWorktree && sourceCwd
+          ? ((await resolveGitRepoRoot(sourceCwd)) ?? undefined)
+          : undefined;
       return startWithDelegationWorktree(
         {
-          cwd: start.cwd as string | undefined,
+          cwd: sourceCwd,
           branch: worktree as string | undefined,
           base: base as string | undefined,
+          includeUncommitted: includeUncommitted as boolean | undefined,
         },
-        (cwd) => {
+        (cwd, createdWorktree) => {
           const input: Record<string, unknown> = {
             ...start,
             ...(cwd !== undefined ? { cwd } : {}),
+            ...(attachGovernanceWorktree && sourceRepoRoot ? { sourceRepoRoot } : {}),
+            ...(attachGovernanceWorktree && createdWorktree
+              ? { worktreeMetadata: createdWorktree }
+              : {}),
           };
           return input.watchTimeoutMs === undefined
             ? handlers.api.start(input as unknown as DelegationStartInput)
@@ -198,6 +227,16 @@ export async function routeDelegationRequest(
         },
       );
     }
+    case "/v1/thread/verify":
+      return governanceApi(handlers.governanceApi).verifyThread(
+        body as unknown as ThreadVerifyInput,
+      );
+    case "/v1/thread/apply":
+      return governanceApi(handlers.governanceApi).applyThread(body as unknown as ThreadApplyInput);
+    case "/v1/thread/discard":
+      return governanceApi(handlers.governanceApi).discardThread(
+        body as unknown as ThreadDiscardInput,
+      );
     case "/v1/thread/send":
       return body.watchTimeoutMs === undefined
         ? handlers.api.send(body as unknown as ThreadSendInput)

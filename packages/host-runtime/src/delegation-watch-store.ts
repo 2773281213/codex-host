@@ -16,6 +16,8 @@ export interface PersistedWatch extends ThreadWatchEntry {
   delivering?: boolean;
   /** Why an `interrupted` outcome was decided after a restart, for the notification. */
   restartNote?: string;
+  /** Verification summary appended when `autoVerify` ran after completion. */
+  verifyNote?: string;
   /** Last observed title, used as the notification link label. */
   title?: string;
   /** Recorded when the watched Thread stops, for client events. */
@@ -115,7 +117,9 @@ function parseWatchFile(text: string): WatchFile {
     !Number.isFinite(watch.deadline) ||
     !optionalNumber(watch.deliveryDeadline) ||
     (watch.delivering !== undefined && typeof watch.delivering !== "boolean") ||
+    (watch.autoVerify !== undefined && typeof watch.autoVerify !== "boolean") ||
     !optionalString(watch.restartNote) ||
+    !optionalString(watch.verifyNote) ||
     !optionalString(watch.title) ||
     !optionalString(watch.harnessId) ||
     (watch.refs !== undefined &&

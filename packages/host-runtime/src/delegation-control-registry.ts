@@ -18,8 +18,11 @@ import {
   type HarnessInspectInput,
   type HarnessListInput,
   type ThreadAnswerInput,
+  type ThreadApplyInput,
+  type ThreadDiscardInput,
   type ThreadListInput,
   type ThreadReadInput,
+  type ThreadVerifyInput,
   type ThreadWaitInput,
   type ThreadWatchInput,
 } from "./delegation-types.js";
@@ -39,6 +42,11 @@ import {
   userDelegationRoutingPath,
   writeDelegationRoutingSetting,
 } from "./delegation-routing.js";
+import {
+  applyGovernedThread,
+  discardGovernedThread,
+  verifyGovernedThread,
+} from "./delegation-worktree-lifecycle.js";
 import { resolveGitRepoRoot } from "./delegation-worktree.js";
 import {
   isMergedListCursor,
@@ -63,6 +71,12 @@ function summarizeGovernance(record: DelegationGovernanceRecord): DelegationGove
     scope: [...record.scope],
     checks: [...record.checks],
     integration: record.integration,
+    ...(record.verification ? { verification: record.verification } : {}),
+    ...(record.checkResults ? { checkResults: record.checkResults } : {}),
+    ...(record.changedFiles ? { changedFiles: [...record.changedFiles] } : {}),
+    ...(record.outOfScope ? { outOfScope: [...record.outOfScope] } : {}),
+    ...(record.patchPath ? { patchPath: record.patchPath } : {}),
+    ...(record.patchStat ? { patchStat: record.patchStat } : {}),
     ...(record.warnings.length > 0 ? { warnings: [...record.warnings] } : {}),
   };
 }
@@ -131,6 +145,7 @@ export class DelegationControlRegistry
       ...(options.diagnose ? { diagnose: options.diagnose } : {}),
       ...(options.watchStore ? { store: options.watchStore } : {}),
       ...(options.clientEvents ? { clientEvents: options.clientEvents } : {}),
+      verify: (threadId) => this.verifyThread({ threadId }),
     });
   }
 
@@ -287,6 +302,15 @@ export class DelegationControlRegistry
 
       let governanceSummary: DelegationGovernanceSummary | undefined;
       if (this.#governance) {
+        const warnings: string[] = [];
+        const wt = rawStart.worktreeMetadata;
+        if (wt?.untrackedCount && wt.untrackedCount > 0) {
+          const sample = wt.untracked ?? [];
+          const more = wt.untrackedCount > sample.length ? ", …" : "";
+          warnings.push(
+            `${wt.untrackedCount} untracked file(s) are not in the worktree baseline: ${sample.join(", ")}${more}`,
+          );
+        }
         const now = new Date().toISOString();
         const saved = this.#governance.save({
           formatVersion: 1,
@@ -304,10 +328,10 @@ export class DelegationControlRegistry
           checks: plan.checks,
           ...(plan.acceptance ? { acceptance: plan.acceptance } : {}),
           ...(resolvedRepoRoot ? { sourceRepoRoot: resolvedRepoRoot } : {}),
-          ...(rawStart.worktreeMetadata ? { worktree: rawStart.worktreeMetadata } : {}),
+          ...(wt ? { worktree: wt } : {}),
           status: result.status,
           integration: "none",
-          warnings: [],
+          warnings,
           createdAt: now,
           updatedAt: now,
         });
@@ -485,6 +509,51 @@ export class DelegationControlRegistry
       environment: this.#environment,
     });
     return { ...written, routing };
+  }
+
+  async verifyThread(input: ThreadVerifyInput) {
+    const store = this.#requireGovernanceStore();
+    return verifyGovernedThread({
+      threadId: input.threadId,
+      api: this,
+      store,
+      environment: this.#environment,
+    });
+  }
+
+  async applyThread(input: ThreadApplyInput) {
+    const store = this.#requireGovernanceStore();
+    return store.withLock(() =>
+      applyGovernedThread({
+        threadId: input.threadId,
+        ...(input.allowOutOfScope !== undefined ? { allowOutOfScope: input.allowOutOfScope } : {}),
+        ...(input.force !== undefined ? { force: input.force } : {}),
+        api: this,
+        store,
+        environment: this.#environment,
+      }),
+    );
+  }
+
+  async discardThread(input: ThreadDiscardInput) {
+    const store = this.#requireGovernanceStore();
+    return store.withLock(() =>
+      discardGovernedThread({
+        threadId: input.threadId,
+        api: this,
+        store,
+      }),
+    );
+  }
+
+  #requireGovernanceStore(): DelegationGovernanceStore {
+    if (!this.#governance) {
+      throw new DelegationControlError(
+        "UNSUPPORTED",
+        "Delegation governance store is unavailable on this Runtime",
+      );
+    }
+    return this.#governance;
   }
 
   #attachGovernance<T extends { threadId: string; status: DelegationGovernanceRecord["status"] }>(

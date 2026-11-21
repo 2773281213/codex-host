@@ -13,6 +13,7 @@ import {
   type ThreadWatchOutcome,
   type ThreadWatchResult,
 } from "./delegation-types.js";
+import type { ThreadVerifyResult } from "./delegation-worktree-lifecycle.js";
 import type { DelegationWatchStore, PersistedWatch } from "./delegation-watch-store.js";
 import { threadWatchLabel } from "./delegation-title.js";
 import type { NewClientEvent } from "./external-client-events.js";
@@ -62,7 +63,9 @@ function persisted(watch: Watch): PersistedWatch {
     deadline,
     deliveryDeadline,
     delivering,
+    autoVerify,
     restartNote,
+    verifyNote,
     title,
     harnessId,
     refs,
@@ -81,7 +84,9 @@ function persisted(watch: Watch): PersistedWatch {
     ...(reason ? { reason } : {}),
     ...(deliveryDeadline !== undefined ? { deliveryDeadline } : {}),
     ...(delivering ? { delivering } : {}),
+    ...(autoVerify ? { autoVerify } : {}),
     ...(restartNote ? { restartNote } : {}),
+    ...(verifyNote ? { verifyNote } : {}),
     ...(title ? { title } : {}),
     ...(harnessId ? { harnessId } : {}),
     ...(refs?.length ? { refs } : {}),
@@ -122,8 +127,22 @@ function duration(milliseconds: number): string {
     : `${Math.round(milliseconds / 60_000)} min`;
 }
 
+function formatAutoVerifyNote(result: ThreadVerifyResult): string {
+  const total = result.checks.length;
+  const passed = result.checks.filter((check) => check.status === "passed").length;
+  const checksSummary = total > 0 ? `${passed}/${total} checks passed` : "no checks declared";
+  const filesSummary = `${result.changedFiles.length} changed file(s), ${result.outOfScope.length} out of scope`;
+  const nextStep =
+    result.ok && result.changedFiles.length > 0 && result.outOfScope.length === 0
+      ? `codexhost thread apply ${result.threadId}`
+      : `codexhost thread discard ${result.threadId}`;
+  return `Auto-verify verdict: ${result.verification} (${checksSummary}; ${filesSummary}). Next: '${nextStep}'.`;
+}
+
 function noticeNote(watch: Watch): string | undefined {
   switch (watch.outcome) {
+    case "completed":
+      return watch.verifyNote;
     case "needsInput": {
       // The request ID lets the receiver answer without guessing which Question fired.
       const request = watch.interactionId
@@ -172,6 +191,8 @@ export class DelegationWatchService {
   readonly #diagnose: (error: unknown) => void;
   readonly #store: DelegationWatchStore | undefined;
   readonly #clientEvents: ClientEventSink | undefined;
+  readonly #onWatchesChanged: (() => void) | undefined;
+  readonly #verify: ((threadId: string) => Promise<ThreadVerifyResult>) | undefined;
   readonly #restoreGraceMs: number;
   readonly #ready: Promise<void>;
   readonly #watches: Watch[] = [];
@@ -189,6 +210,8 @@ export class DelegationWatchService {
       diagnose?: (error: unknown) => void;
       store?: DelegationWatchStore;
       clientEvents?: ClientEventSink;
+      onWatchesChanged?: () => void;
+      verify?: (threadId: string) => Promise<ThreadVerifyResult>;
       restoreGraceMs?: number;
     } = {},
   ) {
@@ -197,6 +220,8 @@ export class DelegationWatchService {
     this.#diagnose = options.diagnose ?? (() => undefined);
     this.#store = options.store;
     this.#clientEvents = options.clientEvents;
+    this.#onWatchesChanged = options.onWatchesChanged;
+    this.#verify = options.verify;
     this.#restoreGraceMs = options.restoreGraceMs ?? DEFAULT_RESTORE_GRACE_MS;
     this.#ready = this.#store ? this.#restore(this.#store) : Promise.resolve();
   }
@@ -267,6 +292,7 @@ export class DelegationWatchService {
       registeredAt: new Date().toISOString(),
       timeoutMs: input.timeoutMs,
       deadline: Date.now() + input.timeoutMs,
+      ...(input.autoVerify === true ? { autoVerify: true } : {}),
       ...(target.title ? { title: target.title } : {}),
     };
     this.#watches.push(watch);
@@ -281,7 +307,26 @@ export class DelegationWatchService {
       );
     }
     this.#schedule();
+    this.#notifyWatchesChanged();
     return { ...result, state: "watching" };
+  }
+
+  /** Counts currently watching children per non-client subscriber Thread (for prompt-cache keep-alive). */
+  activeWatchCountsBySubscriber(): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const watch of this.#watches) {
+      if (watch.state !== "watching") continue;
+      if (originClientName(watch.notifyThreadId) !== undefined) continue;
+      counts.set(watch.notifyThreadId, (counts.get(watch.notifyThreadId) ?? 0) + 1);
+    }
+    return counts;
+  }
+
+  /** Whether `notifyThreadId` is currently waiting on at least one watched Thread. */
+  hasActiveWatchesFor(notifyThreadId: string): boolean {
+    return this.#watches.some(
+      (watch) => watch.state === "watching" && watch.notifyThreadId === notifyThreadId,
+    );
   }
 
   async watches(): Promise<ThreadWatchListResult> {
@@ -312,6 +357,7 @@ export class DelegationWatchService {
             reason,
             registeredAt,
             title,
+            autoVerify,
           }) => {
             const snapshot = snapshots.get(threadId);
             const taskName = snapshot?.title || title;
@@ -330,6 +376,7 @@ export class DelegationWatchService {
               ...(Number.isFinite(registeredMs)
                 ? { watchedForMs: Math.max(0, now - registeredMs) }
                 : {}),
+              ...(autoVerify ? { autoVerify } : {}),
             };
           },
         ),
@@ -433,6 +480,7 @@ export class DelegationWatchService {
     this.#trimUndeliverable();
     if (records.length > 0) this.#diagnose(`restored ${records.length} watch(es) after a restart`);
     this.#schedule();
+    this.#notifyWatchesChanged();
   }
 
   #schedule(delayMs = this.#pollIntervalMs): void {
@@ -470,12 +518,28 @@ export class DelegationWatchService {
         continue;
       const { outcome, turnId, restartNote, interactionId } = observed;
       if (restartNote) watch.restartNote = restartNote;
+      if (outcome === "completed" && watch.autoVerify === true && this.#verify) {
+        try {
+          const verified = await this.#verify(watch.threadId);
+          watch.verifyNote = formatAutoVerifyNote(verified);
+        } catch (error) {
+          watch.verifyNote = `Auto-verify could not run: ${error instanceof Error ? error.message : String(error)}`;
+        }
+        if (
+          this.#closed ||
+          !this.#watches.includes(watch) ||
+          this.#cancelling.has(watch.threadId) ||
+          generation !== watch.observationGeneration
+        )
+          continue;
+      }
       watch.state = "pendingDelivery";
       watch.outcome = outcome;
       if (turnId) watch.turnId = turnId;
       if (interactionId) watch.interactionId = interactionId;
       watch.deliveryDeadline = Date.now() + DELIVERY_WINDOW_MS;
       await this.#persist(watch);
+      this.#notifyWatchesChanged();
     }
     const subscribers = new Set(
       this.#watches
@@ -615,7 +679,9 @@ export class DelegationWatchService {
             : {}),
           ...(watch.harnessId ? { harnessId: watch.harnessId } : {}),
           ...(watch.refs?.length ? { refs: watch.refs } : {}),
-          ...(watch.restartNote ? { note: watch.restartNote } : {}),
+          ...((watch.verifyNote ?? watch.restartNote)
+            ? { note: watch.verifyNote ?? watch.restartNote }
+            : {}),
         })),
       );
       for (const watch of pending) this.#remove(watch);
@@ -678,6 +744,15 @@ export class DelegationWatchService {
     const index = this.#watches.indexOf(watch);
     if (index >= 0) this.#watches.splice(index, 1);
     void this.#write((store) => store.remove(watch.id));
+    this.#notifyWatchesChanged();
+  }
+
+  #notifyWatchesChanged(): void {
+    try {
+      this.#onWatchesChanged?.();
+    } catch (error) {
+      this.#diagnose(error);
+    }
   }
 
   #trimUndeliverable(): void {

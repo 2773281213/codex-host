@@ -31,11 +31,12 @@ List Harnesses available in the active Runtime.`,
 Read available Models, native defaults, Thinking options, and configuration capabilities.
 Use the returned Model and Thinking IDs for explicit selections.
 For Codex Ultrafast, use the ID of the advertised "<Model> · Ultrafast" entry as --model. Pass the Thinking option separately, for example --thinking max if the entry supports it. For Codex Fast, use fastModel.id from --format json.`,
-  "delegate start": `codexhost delegate start (--harness <id> | --tier <deep|light|review>) (--task <text> | --task-file <path|->) [--profile <name>] [--scope <path>]... [--check <cmd>]... [--acceptance <text>] [--task-name <name>] [--cwd <path>] [--worktree <branch>] [--base <ref>] [--allow-nested-delegation true|false] [--model <opaque-ref>] [--thinking <option-id>] [--parent-thread <thread>] [--request-id <id>] [--ref <uri>]... [--watch true|false] [--watch-timeout-ms <n>] [--format json|compact|text]
+  "delegate start": `codexhost delegate start (--harness <id> | --tier <deep|light|review>) (--task <text> | --task-file <path|->) [--profile <name>] [--scope <path>]... [--check <cmd>]... [--acceptance <text>] [--task-name <name>] [--cwd <path>] [--worktree <branch>] [--base <ref>] [--include-uncommitted true|false] [--allow-nested-delegation true|false] [--model <opaque-ref>] [--thinking <option-id>] [--parent-thread <thread>] [--request-id <id>] [--ref <uri>]... [--watch true|false] [--watch-timeout-ms <n>] [--auto-verify true|false] [--format json|compact|text]
 Create an independent child Thread, submit the task, and return immediately.
 Specify --harness directly, or --tier deep|light|review to route via the configured planner-neutral routing profile (see codexhost delegate routing --help). --harness overrides the tier's default Harness.
 --scope <path> (repeatable) declares project-relative files or directories this delegation may modify; concurrent write delegations with overlapping scopes in the same repository are rejected with SCOPE_CONFLICT. light tier requires 1-10 non-root scope paths and at least one --check; deep tier requires --scope ("." for the whole repository); review tier is read-only.
---check <cmd> (repeatable) declares verification commands. --acceptance appends acceptance criteria.
+--check <cmd> (repeatable) declares verification commands run in the workspace/worktree by 'codexhost thread verify'. --acceptance appends acceptance criteria.
+--include-uncommitted true (with --worktree, incompatible with --base) snapshots tracked uncommitted edits via git stash create into the worktree baseline and reports untracked files.
 --allow-nested-delegation defaults to false for governed tiers (injecting CODEXHOST_DELEGATION_ROLE=executor to prevent recursive delegation).
 --task and --task-file are mutually exclusive. --task-file reads UTF-8 from a file, or stdin for -; maximum 262144 bytes (256 KiB) before removing one final LF or CRLF. Other whitespace and special characters are preserved; empty/whitespace-only input is rejected. Terminal stdin is rejected: use a quoted heredoc (<<'EOF') or a pipe. --task is unchanged.
 --task-name supplies a short subtask name (1-120 characters); otherwise the first task line is used.
@@ -43,8 +44,8 @@ The child title is the subtask name only, fixed at creation; parent titles are n
 Omit --model and --thinking to use the Harness native defaults.
 --cwd overrides the child workspace; a relative path resolves against the caller process cwd. Otherwise use the resolved parent Thread workspace, then the Host Runtime process cwd.
 --worktree creates a new branch and workspace at <main-repository>.worktrees/<sanitized-branch>, then uses it as the child cwd. The source is --cwd, or the caller process cwd when omitted (not the parent Thread workspace).
---base requires --worktree and defaults to that source checkout's HEAD commit, including detached HEAD. JSON and compact responses add worktree {path, branch, base}, where base is the resolved commit SHA. Existing branches/directories, merges, rebases, unmerged indexes, non-Git cwd and unresolved bases are rejected. Uncommitted source changes are not copied.
-No automatic merge or cleanup is performed; --request-id does not reuse an existing worktree or branch. If creation or the Runtime request fails after creating artifacts, the error reports any retained worktree/branch in details.worktree (worktreeRetained=true); a failed response can still mean the child started.
+--base requires --worktree and defaults to that source checkout's HEAD commit, including detached HEAD. JSON and compact responses add worktree {path, branch, base}, where base is the resolved commit SHA. Existing branches/directories, merges, rebases, unmerged indexes, non-Git cwd and unresolved bases are rejected. Uncommitted source changes are not copied unless --include-uncommitted true is set.
+Use 'codexhost thread verify <thread>', 'codexhost thread apply <thread>' or 'codexhost thread discard <thread>' to audit checks/patches and integrate or clean up a governed worktree.
 --parent-thread overrides caller inference. PARENT_THREAD_AMBIGUOUS requires an explicit parent.
 Reuse --request-id for an idempotent retry. Identical recent parent/target/task/configuration requests are also deduplicated briefly.
 --watch true also registers thread watch on the child with the resolved parent as the notified Thread; the response's watch field reports whether it was registered.
@@ -57,7 +58,7 @@ codexhost delegate routing unset <key> [--cwd <path>] [--user true|false] [--for
 Inspect or update planner-neutral tiered routing profiles (deep/light/review -> harnessId[:model][@thinking]).
 Project settings live in <repo>/.codexhost/delegation-routing.json and override ~/.codexhost/delegation-routing.json (--user true).
 Settable keys: profile, plannerProfiles.<harness>, profiles.<name>.<deep|light|review>, checks.timeoutMinutes, checks.shell, light.maxScopeEntries, light.maxChangedFiles.`,
-  "thread send": `codexhost thread send <thread> (--message <text> | --message-file <path|->) [--interrupt] [--steer true|false] [--watch true|false] [--watch-timeout-ms <n>] [--format json|compact|text]
+  "thread send": `codexhost thread send <thread> (--message <text> | --message-file <path|->) [--interrupt] [--steer true|false] [--watch true|false] [--watch-timeout-ms <n>] [--auto-verify true|false] [--format json|compact|text]
 Start a new Turn in a writable Thread and return after submission.
 --message and --message-file are mutually exclusive. --message-file reads UTF-8 from a file, or stdin for -; maximum 262144 bytes (256 KiB) before removing one final LF or CRLF. Other whitespace and special characters are preserved; empty/whitespace-only input is rejected. Terminal stdin is rejected: use a quoted heredoc (<<'EOF') or a pipe. --message is unchanged.
 Without --interrupt or --steer true, THREAD_BUSY means the current Turn is still active. Messages are not queued.
@@ -87,8 +88,9 @@ Answer one pending Question request reported by thread read in pendingQuestions,
 Read pendingQuestions[].request for the original prompts and option labels. Reply interpretation, cancellation, and invalid-input behavior belong to the existing handler, just as for Desktop. Do not assume a rejected reply can be retried; read the Thread again.
 QUESTION_NOT_PENDING means the interaction ID is unknown, already answered by the user or another caller, cancelled, expired, or from a finished Turn or retired Runtime.
 The reply is submitted to the existing request handler, and the same Question closes in Desktop. The receipt means the answer was accepted, not that the delegated work succeeded: read or wait for the outcome.`,
-  "thread watch": `codexhost thread watch <thread> [--notify <thread>] [--timeout-ms <n>] [--format json|compact|text]
+  "thread watch": `codexhost thread watch <thread> [--notify <thread>] [--timeout-ms <n>] [--auto-verify true|false] [--format json|compact|text]
 Ask the Host to notify one Thread, once, when the watched Thread stops or waits for an answer. Returns immediately; no waiting or polling by the caller is needed, and the caller may end its Turn.
+--auto-verify true runs 'codexhost thread verify' automatically when a governed Thread completes and appends the verdict to the notification note.
 --notify defaults to the calling Thread when it is identified (CODEXHOST_THREAD_ID, or CODEX_THREAD_ID in native Codex); for an external client it defaults to the client, and the notification becomes an event in its log (see codexhost events). Otherwise it is required. delegate start reports the caller as its parent.
 The notification starts a new Turn in the notified Thread with the watched Thread's link and outcome: completed, failed, interrupted, needsInput, timedOut, unreadable, or notFound. It reports execution state only and asks the notified agent to read each Thread's result before continuing.
 Link labels use the observed title (Thread id if unavailable); a suffix after " · " is limited to 20 characters plus an ellipsis without renaming the Thread.
@@ -99,6 +101,13 @@ A watch is one-shot with no standalone unsubscribe command; an accepted thread c
   "thread watches": `codexhost thread watches [--format json|compact|text]
 List watches that have not been delivered: watching, pendingDelivery (waiting for the notified Thread), or undeliverable (with the reason). Delivered watches are removed.
 Entries include taskName when known, threadStatus when readable, and watchedForMs since registration (including downtime). Text prints one watch per line.`,
+  "thread verify": `codexhost thread verify <thread> [--format json|compact|text]
+Run declared verification checks in a finished governed Thread's workspace/worktree, collect its binary patch relative to baseline, audit out-of-scope file edits, and return the Birdview verification verdict (passed, failed, not-run, or unverified).`,
+  "thread apply": `codexhost thread apply <thread> [--allow-out-of-scope true|false] [--force true|false] [--format json|compact|text]
+Dry-run and apply a completed governed worktree Thread's patch unstaged to its source repository, then remove the worktree and branch and release its write-scope lock.
+Out-of-scope edits require --allow-out-of-scope true after review; failed checks or non-completed status require --force true.`,
+  "thread discard": `codexhost thread discard <thread> [--format json|compact|text]
+Discard a finished governed Thread's worktree and branch and release its write-scope lock. Running Threads must be cancelled first.`,
   "thread list": `codexhost thread list [--cwd <path>] [--parent <thread> | --client <name>] [--ref <uri>] [--limit <n>] [--cursor <cursor>] [--sort created-asc|created-desc|updated-asc|updated-desc|recency-asc|recency-desc] [--format json|compact|text]
 Find existing Threads by workspace, or use --parent to list a Thread's delegated children.
 Workspace listing defaults to the caller process cwd. Default limit 25 (maximum 100), sorted created-desc.
@@ -136,6 +145,9 @@ export const DELEGATION_HELP = `usage:
   codexhost thread answer <thread> --interaction <id> --answers-file <file>
   codexhost thread watch <thread>
   codexhost thread watches
+  codexhost thread verify <thread>
+  codexhost thread apply <thread> [--allow-out-of-scope true] [--force true]
+  codexhost thread discard <thread>
   codexhost thread list
   codexhost client add|list|remove
   codexhost events
