@@ -127,6 +127,22 @@ const TOOLS: Tool[] = [
         cwd: string("Absolute workspace path; required with worktree"),
         worktree: string("New Git branch; create an isolated checkout on this Host"),
         base: string("Git ref for worktree; requires worktree, defaults to source HEAD"),
+        scope: {
+          type: "array",
+          items: { type: "string" },
+          description: "Project-relative files or directories this delegation may modify",
+        },
+        checks: {
+          type: "array",
+          items: { type: "string" },
+          description: "Verification shell commands declared for the workspace",
+        },
+        acceptance: string("Acceptance criteria shown to the delegated executor"),
+        allowNestedDelegation: {
+          type: "boolean",
+          description:
+            "Allow the delegated child to dispatch further tasks (default false for governed tiers)",
+        },
         model: string("Model id from harness_inspect"),
         thinking: string("Thinking option id from harness_inspect"),
         parentThread: string("Optional parent Thread"),
@@ -155,6 +171,10 @@ const TOOLS: Tool[] = [
           "refs",
           "worktree",
           "base",
+          "scope",
+          "checks",
+          "acceptance",
+          "allowNestedDelegation",
           "watch",
           "watchTimeoutMs",
         ]),

@@ -23,6 +23,7 @@ import {
   hostTurnIdSchema,
 } from "@codexhost/shared-contracts";
 
+import { DELEGATION_EXECUTOR_ROLE, DELEGATION_ROLE_ENV } from "./delegation-policy.js";
 import {
   DELEGATION_THREAD_ID_ENV,
   DelegationControlError,
@@ -348,7 +349,13 @@ export class HarnessDelegationCoordinator {
         const opened = await adapter.open({
           kind: "create",
           cwd: record.cwd,
-          environment: { ...this.#environment, [DELEGATION_THREAD_ID_ENV]: childThreadId },
+          environment: {
+            ...this.#environment,
+            [DELEGATION_THREAD_ID_ENV]: childThreadId,
+            ...(input.allowNestedDelegation === false
+              ? { [DELEGATION_ROLE_ENV]: DELEGATION_EXECUTOR_ROLE }
+              : {}),
+          },
           executionPolicy: "unattended-full-access",
           ...(input.model ? { model: input.model } : {}),
           ...(input.thinkingOptionId ? { thinkingOptionId: input.thinkingOptionId } : {}),

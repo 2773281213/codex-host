@@ -9,6 +9,7 @@ import {
   type DelegationControlApi,
   type DelegationControlRegistration,
   type DelegationGovernanceApi,
+  type DelegationGovernanceSummary,
   type DelegationRoutingMutateInput,
   type DelegationRoutingMutateResult,
   type DelegationRoutingShowInput,
@@ -22,6 +23,15 @@ import {
   type ThreadWaitInput,
   type ThreadWatchInput,
 } from "./delegation-types.js";
+import type {
+  DelegationGovernanceRecord,
+  DelegationGovernanceStore,
+} from "./delegation-governance-store.js";
+import {
+  buildGovernedTaskPrompt,
+  checkExecutorRoleGuard,
+  validateGovernancePolicy,
+} from "./delegation-policy.js";
 import {
   loadDelegationRoutingConfig,
   loadDelegationRoutingLayers,
@@ -43,6 +53,31 @@ import { validateThreadExportInput, type ThreadExportInput } from "./delegation-
 import { mergeRefs, normalizeRefs, type ThreadRefsStore } from "./thread-refs.js";
 
 const REF_CURSOR_PREFIX = "ref:";
+
+function summarizeGovernance(record: DelegationGovernanceRecord): DelegationGovernanceSummary {
+  return {
+    ...(record.tier ? { tier: record.tier } : {}),
+    ...(record.profile ? { profile: record.profile } : {}),
+    ...(record.plannerHarnessId ? { plannerHarnessId: record.plannerHarnessId } : {}),
+    write: record.write,
+    scope: [...record.scope],
+    checks: [...record.checks],
+    integration: record.integration,
+    ...(record.warnings.length > 0 ? { warnings: [...record.warnings] } : {}),
+  };
+}
+
+function isGovernedStart(input: DelegationStartInput): boolean {
+  return (
+    input.tier !== undefined ||
+    input.profile !== undefined ||
+    (input.scope !== undefined && input.scope.length > 0) ||
+    (input.checks !== undefined && input.checks.length > 0) ||
+    input.acceptance !== undefined ||
+    input.worktreeMetadata !== undefined ||
+    input.allowNestedDelegation === false
+  );
+}
 
 /** Adds references to a result only when there are some, so existing output stays unchanged. */
 function withRefs<T extends object>(value: T, refs: readonly string[]): T {
@@ -74,6 +109,7 @@ export class DelegationControlRegistry
   readonly #remoteRead:
     ((input: ThreadReadInput) => ReturnType<DelegationControlApi["read"]>) | undefined;
   readonly #refs: ThreadRefsStore | undefined;
+  readonly #governance: DelegationGovernanceStore | undefined;
   readonly #environment: NodeJS.ProcessEnv;
 
   constructor(
@@ -83,11 +119,13 @@ export class DelegationControlRegistry
       watchStore?: DelegationWatchStore;
       refs?: ThreadRefsStore;
       clientEvents?: ClientEventSink;
+      governanceStore?: DelegationGovernanceStore;
       environment?: NodeJS.ProcessEnv;
     } = {},
   ) {
     this.#remoteRead = options.remoteRead;
     this.#refs = options.refs;
+    this.#governance = options.governanceStore;
     this.#environment = options.environment ?? process.env;
     this.#watchService = new DelegationWatchService(this, {
       ...(options.diagnose ? { diagnose: options.diagnose } : {}),
@@ -138,8 +176,30 @@ export class DelegationControlRegistry
     const { refs: requested, ...rawStart } = input;
     // Validated before anything is created, so a bad reference never leaves a Thread behind.
     const own = normalizeRefs(requested);
-    let start: DelegationStartInput = rawStart;
-    if (rawStart.tier !== undefined || rawStart.profile !== undefined) {
+
+    // Anti-recursion guard: governed executor Threads cannot dispatch further delegations.
+    const callerParentRecord =
+      rawStart.parentThreadId && !originClientName(rawStart.parentThreadId)
+        ? this.#governance?.get(rawStart.parentThreadId)
+        : null;
+    checkExecutorRoleGuard({
+      ...(rawStart.callerRole ? { callerRole: rawStart.callerRole } : {}),
+      ...(callerParentRecord
+        ? { callerIsExecutorThread: !callerParentRecord.allowNestedDelegation }
+        : {}),
+    });
+
+    if (!isGovernedStart(rawStart)) {
+      const result = await (await this.#registrationForStart(rawStart)).start(rawStart);
+      if (!this.#refs) return result;
+      const parent = result.parentThreadId ?? rawStart.parentThreadId;
+      const inherited = parent && !originClientName(parent) ? await this.#refs.get(parent) : [];
+      const refs = mergeRefs(inherited, own);
+      if (refs.length > 0) await this.#refs.set(result.threadId, refs, result.cwd, result.title);
+      return withRefs(result, refs);
+    }
+
+    const executeGoverned = async () => {
       const parentCandidate = rawStart.parentThreadId;
       const plannerHarnessId =
         parentCandidate && !originClientName(parentCandidate)
@@ -147,16 +207,28 @@ export class DelegationControlRegistry
               .then((snapshot) => snapshot.harnessId)
               .catch(() => "unknown")
           : "unknown";
-      const resolvedRepoRoot = rawStart.cwd
-        ? ((await resolveGitRepoRoot(rawStart.cwd)) ?? undefined)
-        : undefined;
+      const sourceCwd = rawStart.sourceRepoRoot ?? rawStart.cwd;
+      const resolvedRepoRoot =
+        rawStart.sourceRepoRoot ??
+        (sourceCwd ? ((await resolveGitRepoRoot(sourceCwd)) ?? undefined) : undefined);
       const routing = loadDelegationRoutingConfig({
         ...(resolvedRepoRoot ? { repoRoot: resolvedRepoRoot } : {}),
         environment: this.#environment,
         plannerHarnessId,
         ...(rawStart.profile ? { explicitProfile: rawStart.profile } : {}),
       });
-      const tierRoute = rawStart.tier ? routing.routes[rawStart.tier] : undefined;
+
+      const plan = validateGovernancePolicy({
+        ...(rawStart.tier ? { tier: rawStart.tier } : {}),
+        ...(rawStart.scope ? { scope: rawStart.scope } : {}),
+        ...(rawStart.checks ? { checks: rawStart.checks } : {}),
+        ...(rawStart.acceptance ? { acceptance: rawStart.acceptance } : {}),
+        ...(resolvedRepoRoot ? { sourceRepoRoot: resolvedRepoRoot } : {}),
+        existingRecords: this.#governance?.list() ?? [],
+        maxLightScopeEntries: routing.light.maxScopeEntries,
+      });
+
+      const tierRoute = plan.tier ? routing.routes[plan.tier] : undefined;
       const explicitHarness =
         typeof rawStart.harnessId === "string" && rawStart.harnessId.trim()
           ? rawStart.harnessId
@@ -180,20 +252,78 @@ export class DelegationControlRegistry
         (routeMatchesHarness && tierRoute?.thinkingOptionId
           ? harnessThinkingOptionIdSchema.parse(tierRoute.thinkingOptionId)
           : undefined);
-      start = {
+
+      const shouldEnrichTask =
+        plan.tier !== undefined ||
+        (rawStart.scope !== undefined && rawStart.scope.length > 0) ||
+        plan.checks.length > 0 ||
+        plan.acceptance !== undefined;
+      const allowNested = rawStart.allowNestedDelegation === true;
+      const task = shouldEnrichTask
+        ? buildGovernedTaskPrompt({
+            task: rawStart.task,
+            ...(plan.tier ? { tier: plan.tier } : {}),
+            write: plan.write,
+            scope: plan.scope,
+            checks: plan.checks,
+            ...(plan.acceptance ? { acceptance: plan.acceptance } : {}),
+            ...(rawStart.worktreeMetadata?.base
+              ? { baseCommit: rawStart.worktreeMetadata.base }
+              : {}),
+            isWorktree: Boolean(rawStart.worktreeMetadata),
+            allowNestedDelegation: allowNested,
+          })
+        : rawStart.task;
+
+      const startInput: DelegationStartInput = {
         ...rawStart,
         harnessId: resolvedHarnessId,
+        task,
+        allowNestedDelegation: allowNested,
         ...(resolvedModel ? { model: resolvedModel } : {}),
         ...(resolvedThinking ? { thinkingOptionId: resolvedThinking } : {}),
       };
-    }
-    const result = await (await this.#registrationForStart(start)).start(start);
-    if (!this.#refs) return result;
-    const parent = result.parentThreadId ?? start.parentThreadId;
-    const inherited = parent && !originClientName(parent) ? await this.#refs.get(parent) : [];
-    const refs = mergeRefs(inherited, own);
-    if (refs.length > 0) await this.#refs.set(result.threadId, refs, result.cwd, result.title);
-    return withRefs(result, refs);
+      const result = await (await this.#registrationForStart(startInput)).start(startInput);
+
+      let governanceSummary: DelegationGovernanceSummary | undefined;
+      if (this.#governance) {
+        const now = new Date().toISOString();
+        const saved = this.#governance.save({
+          formatVersion: 1,
+          threadId: result.threadId,
+          ...((result.parentThreadId ?? rawStart.parentThreadId)
+            ? { parentThreadId: result.parentThreadId ?? rawStart.parentThreadId }
+            : {}),
+          ...(plannerHarnessId !== "unknown" ? { plannerHarnessId } : {}),
+          harnessId: result.harnessId,
+          ...(plan.tier ? { tier: plan.tier } : {}),
+          ...(plan.tier ? { profile: routing.profile } : {}),
+          write: plan.write,
+          allowNestedDelegation: allowNested,
+          scope: plan.scope,
+          checks: plan.checks,
+          ...(plan.acceptance ? { acceptance: plan.acceptance } : {}),
+          ...(resolvedRepoRoot ? { sourceRepoRoot: resolvedRepoRoot } : {}),
+          ...(rawStart.worktreeMetadata ? { worktree: rawStart.worktreeMetadata } : {}),
+          status: result.status,
+          integration: "none",
+          warnings: [],
+          createdAt: now,
+          updatedAt: now,
+        });
+        governanceSummary = summarizeGovernance(saved);
+      }
+
+      const withGov = governanceSummary ? { ...result, governance: governanceSummary } : result;
+      if (!this.#refs) return withGov;
+      const parent = withGov.parentThreadId ?? rawStart.parentThreadId;
+      const inherited = parent && !originClientName(parent) ? await this.#refs.get(parent) : [];
+      const refs = mergeRefs(inherited, own);
+      if (refs.length > 0) await this.#refs.set(withGov.threadId, refs, withGov.cwd, withGov.title);
+      return withRefs(withGov, refs);
+    };
+
+    return this.#governance ? this.#governance.withLock(executeGoverned) : executeGoverned();
   }
 
   async send(input: Parameters<DelegationControlApi["send"]>[0]) {
@@ -222,7 +352,8 @@ export class DelegationControlRegistry
 
   async read(input: ThreadReadInput) {
     const snapshot = await this.#read(input);
-    return withRefs(snapshot, (await this.#refs?.get(snapshot.threadId)) ?? []);
+    const withGovernance = this.#attachGovernance(snapshot);
+    return withRefs(withGovernance, (await this.#refs?.get(snapshot.threadId)) ?? []);
   }
 
   async #read(input: ThreadReadInput) {
@@ -267,7 +398,8 @@ export class DelegationControlRegistry
     if (input.hostId !== undefined && input.hostId !== "local")
       throw new DelegationControlError("INVALID_ARGUMENT", "Remote Hosts support thread read only");
     const snapshot = await (await this.#registrationForThread(input.threadId)).wait(input);
-    return withRefs(snapshot, (await this.#refs?.get(snapshot.threadId)) ?? []);
+    const withGovernance = this.#attachGovernance(snapshot);
+    return withRefs(withGovernance, (await this.#refs?.get(snapshot.threadId)) ?? []);
   }
 
   async answer(input: ThreadAnswerInput) {
@@ -353,6 +485,25 @@ export class DelegationControlRegistry
       environment: this.#environment,
     });
     return { ...written, routing };
+  }
+
+  #attachGovernance<T extends { threadId: string; status: DelegationGovernanceRecord["status"] }>(
+    snapshot: T,
+  ): T & { governance?: DelegationGovernanceSummary } {
+    if (!this.#governance) return snapshot;
+    let record = this.#governance.get(snapshot.threadId);
+    if (!record) return snapshot;
+    if (
+      record.status !== "verifying" &&
+      record.status !== snapshot.status &&
+      record.integration === "none"
+    ) {
+      record =
+        this.#governance.update(snapshot.threadId, (draft) => {
+          draft.status = snapshot.status;
+        }) ?? record;
+    }
+    return { ...snapshot, governance: summarizeGovernance(record) };
   }
 
   /** Stops watching in this process; stored watches resume in the next Runtime. */

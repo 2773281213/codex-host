@@ -14,6 +14,10 @@ import { OfficialRuntimeScope } from "./codex-runtime/official-runtime-scope.js"
 import { createOwnedUnixBackend } from "./codex-runtime/owned-official-backends.js";
 import { DelegationControlRegistry } from "./delegation-control-registry.js";
 import {
+  DelegationGovernanceStore,
+  defaultDelegationGovernanceDirectory,
+} from "./delegation-governance-store.js";
+import {
   FileDelegationWatchStore,
   defaultDelegationWatchDirectory,
 } from "./delegation-watch-store.js";
@@ -208,6 +212,9 @@ export async function prepareDelegationRuntime(input: {
     directory: path.join(codexhostDataDirectory(input.environment), "client-events"),
     retentionDays: eventRetentionDays(input.environment),
   });
+  const governanceStore = new DelegationGovernanceStore(
+    defaultDelegationGovernanceDirectory(input.environment),
+  );
   const registry = new DelegationControlRegistry({
     remoteRead: (request) => readRemoteDelegationThread(input.environment, request),
     diagnose: diagnoseWatch,
@@ -219,6 +226,7 @@ export async function prepareDelegationRuntime(input: {
       path.join(codexhostDataDirectory(input.environment), "thread-refs"),
     ),
     clientEvents: events,
+    governanceStore,
     environment: input.environment,
   });
   const token = randomBytes(32).toString("hex");
