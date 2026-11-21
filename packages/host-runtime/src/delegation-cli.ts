@@ -663,10 +663,10 @@ export async function runDelegationCli(input: {
           "INVALID_ARGUMENT",
           "--watch-timeout-ms requires --watch true",
         );
-      const sendAutoVerify = value(parsed, "--auto-verify");
-      if (sendAutoVerify !== undefined && sendAutoVerify !== "true" && sendAutoVerify !== "false")
+      const autoVerify = value(parsed, "--auto-verify");
+      if (autoVerify !== undefined && autoVerify !== "true" && autoVerify !== "false")
         throw new DelegationControlError("INVALID_ARGUMENT", "--auto-verify must be true or false");
-      if (watch !== "true" && sendAutoVerify === "true")
+      if (watch !== "true" && autoVerify === "true")
         throw new DelegationControlError(
           "INVALID_ARGUMENT",
           "--auto-verify true requires --watch true",
@@ -688,7 +688,7 @@ export async function runDelegationCli(input: {
                   watchTimeoutMs: value(parsed, "--watch-timeout-ms")
                     ? positiveInteger(value(parsed, "--watch-timeout-ms"), "--watch-timeout-ms")
                     : DEFAULT_WATCH_TIMEOUT_MS,
-                  ...(sendAutoVerify === "true" ? { autoVerify: true } : {}),
+                  ...(autoVerify === "true" ? { autoVerify: true } : {}),
                 }
               : {}),
           },
@@ -983,6 +983,34 @@ export async function runDelegationCli(input: {
           environment,
           path: "/v1/thread/discard",
           body: { threadId: normalizeThreadId(threadId) },
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+        }),
+      );
+      return 0;
+    }
+    if (group === "thread" && command === "keepalive") {
+      rejectUnknown(parsed, ["--thread"]);
+      if (parsed.positionals.length > 1)
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "thread keepalive accepts at most one action (status, on, or off)",
+        );
+      const action = parsed.positionals[0] ?? "status";
+      if (action !== "status" && action !== "on" && action !== "off")
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "thread keepalive action must be status, on, or off",
+        );
+      const explicitThread = value(parsed, "--thread");
+      writeResult(
+        "thread keepalive",
+        await requestRuntime({
+          environment,
+          path: "/v1/thread/keepalive",
+          body: {
+            action,
+            ...(explicitThread ? { threadId: normalizeThreadId(explicitThread) } : {}),
+          },
           ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
         }),
       );

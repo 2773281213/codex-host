@@ -11,6 +11,7 @@ import {
 } from "@codexhost/desktop-control/renderer-bindings";
 import { createRendererHostClients } from "./renderer-host-clients.js";
 import { installIdleReleasePreferenceSync } from "./renderer-idle-release-preference.js";
+import { installPromptCacheKeepAlivePreferenceSync } from "./renderer-prompt-cache-keepalive-preference.js";
 import { installRendererHarnessPreferenceSync } from "./renderer-harness-preferences.js";
 import {
   encodeHarnessPluginRoute,
@@ -888,6 +889,7 @@ export function installCurrentRendererAdapter(): {
 
   const usageSubscription = createThreadUsageSubscriptionRelay();
   const idleReleaseSync = installIdleReleasePreferenceSync(window);
+  const keepAliveSync = installPromptCacheKeepAlivePreferenceSync(window);
   const preferencesSync = installRendererHarnessPreferenceSync(window);
   const clients = createRendererHostClients(() => window.__codexhostHostRoutingV1, window);
   const stopGroupSync = startAgentGroupSync(
@@ -915,6 +917,7 @@ export function installCurrentRendererAdapter(): {
         ? client
         : clients.forHost("local");
     idleReleaseSync.connect(localClient);
+    keepAliveSync.connect(localClient);
     stopGroupSync.connect();
     preferencesSync.connect("local", localClient);
     if (route?.hostId && route.hostId !== "local") preferencesSync.connect(route.hostId, client);
@@ -1159,6 +1162,7 @@ export function installCurrentRendererAdapter(): {
         () => clients.dispose(),
         () => usageSubscription.dispose(),
         () => idleReleaseSync.dispose(),
+        () => keepAliveSync.dispose(),
         () => preferencesSync.dispose(),
       ];
       selectedPolicies.clear();

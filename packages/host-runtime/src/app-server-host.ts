@@ -44,8 +44,11 @@ import {
 import {
   HARNESS_PREFERENCES_CHANGED_METHOD,
   DEFAULT_IDLE_RELEASE_SETTINGS,
+  DEFAULT_PROMPT_CACHE_KEEPALIVE_SETTINGS,
   type HarnessPreferenceSnapshot,
 } from "@codexhost/shared-contracts";
+import { PromptCacheKeepAliveService } from "./prompt-cache-keepalive.js";
+import type { PromptCacheKeepAliveApi, ThreadKeepAliveInput } from "./delegation-types.js";
 import type { SharedThreadBridge } from "./shared-thread-bridge.js";
 import {
   isConsoleHostMethod,
@@ -438,6 +441,12 @@ export interface AppServerHostOptions {
   consoleOpener?: HostConsoleOpener;
   webOpener?: HostWebOpener;
   onDelegationApi?: (api: DelegationControlRegistration) => (() => void) | undefined;
+  /** Optional observer of active delegation watches, used to protect waiting planners and keep prompt caches warm. */
+  delegationWatchObserver?: {
+    activeWatchCountsBySubscriber(): ReadonlyMap<string, number>;
+    hasActiveWatchesFor(notifyThreadId: string): boolean;
+    onWatchesChanged(listener: () => void): () => void;
+  };
   /** Shared by all Hosts of one runtime; defaults to the bundled snapshot only. */
   modelPrices?: ModelPriceCatalog;
   /** Machine-wide usage statistics; one per runtime, read from the loaded Harness plugins. */
@@ -836,6 +845,8 @@ export class AppServerHost {
   #appliedPreferenceRevision = -1;
   readonly #accountInspections = new HarnessAccountInspectionCache();
   #externalRuntime!: ExternalThreadRuntime;
+  readonly #promptCacheKeepAlive: PromptCacheKeepAliveService;
+  #unsubscribeKeepAliveWatches: (() => void) | undefined;
   readonly #executionHosts = new WeakMap<ExternalThread, string>();
   readonly #externalPrewarms = new ExternalThreadPrewarms();
   readonly #externalSteering: ExternalTurnSteering;
@@ -1156,6 +1167,7 @@ export class AppServerHost {
         queue: this.#desktopRequests,
         onClosed: (thread) => this.#resolveThreadInteractions(thread),
         canRelease: (thread) =>
+          !this.#options.delegationWatchObserver?.hasActiveWatchesFor(thread.id) &&
           !this.#hasRunningSubagents(thread.id) &&
           !thread.session.hasBackgroundWork?.() &&
           !this.#externalSteering.hasPending(thread.id) &&
@@ -1167,6 +1179,48 @@ export class AppServerHost {
           ![...this.#pendingDesktopQuestions.values()].some((pending) => pending.thread === thread),
       },
     });
+    this.#promptCacheKeepAlive = new PromptCacheKeepAliveService({
+      activeWatchCounts: () =>
+        this.#options.delegationWatchObserver?.activeWatchCountsBySubscriber() ?? new Map(),
+      resolveTarget: (threadId) => {
+        const thread = this.#externalRuntime.get(threadId);
+        if (
+          !thread ||
+          thread.sessionUnavailable ||
+          this.#externalRuntime.idleRelease.failure(thread)
+        ) {
+          return undefined;
+        }
+        const refresh = thread.session.refreshPromptCache;
+        return {
+          threadId: thread.id,
+          harnessId: thread.harnessId,
+          busy:
+            thread.running ||
+            thread.activeTurnId !== null ||
+            this.#externalSteering.hasPending(thread.id),
+          canRefresh: typeof refresh === "function",
+          refreshPromptCache: () =>
+            this.#externalRuntime.idleRelease.runOperation(thread.id, async () => {
+              if (typeof thread.session.refreshPromptCache !== "function") {
+                return {
+                  ok: false as const,
+                  error: {
+                    code: "unsupported" as const,
+                    message: "Harness Session does not support prompt-cache refresh",
+                    retryable: false,
+                  },
+                };
+              }
+              return thread.session.refreshPromptCache();
+            }),
+        };
+      },
+      diagnose: (message) => this.#diagnose(message),
+    });
+    this.#unsubscribeKeepAliveWatches = this.#options.delegationWatchObserver?.onWatchesChanged(
+      () => this.#promptCacheKeepAlive.syncTimer(),
+    );
     this.#delegationCoordinator = new HarnessDelegationCoordinator({
       adapters: this.#externalAdapters,
       environment: this.#options.environment ?? process.env,
@@ -1273,6 +1327,9 @@ export class AppServerHost {
       hasRunningSubagents: (parentThreadId) => this.#hasRunningSubagents(parentThreadId),
       publishExternalQueue: (threadId) => this.#publishExternalQueue(threadId),
       startNextQueuedExternalTurn: (thread) => this.#startNextQueuedExternalTurn(thread),
+      onTurnStarted: (thread) => this.#promptCacheKeepAlive.recordRequest(thread.id),
+      onCompaction: (thread, trigger) =>
+        this.#promptCacheKeepAlive.recordCompaction(thread.id, trigger),
     });
     const desktopEnvironment = options.environment ?? process.env;
     this.desktopExtensionBackends =
@@ -1486,11 +1543,25 @@ export class AppServerHost {
     }
   }
 
+  get promptCacheKeepAliveApi(): PromptCacheKeepAliveApi {
+    return {
+      keepAlive: async (input?: ThreadKeepAliveInput) => {
+        const action = input?.action ?? "status";
+        if (action === "off") this.#promptCacheKeepAlive.pause(input?.threadId, "off");
+        else if (action === "on") this.#promptCacheKeepAlive.resume(input?.threadId);
+        return this.#promptCacheKeepAlive.status(input?.threadId);
+      },
+    };
+  }
+
   #applyHarnessPreferences(snapshot: HarnessPreferenceSnapshot): void {
     if (snapshot.scope !== "external" || snapshot.revision < this.#appliedPreferenceRevision)
       return;
     this.#externalRuntime.idleRelease.configure(
       snapshot.values.idleRelease ?? DEFAULT_IDLE_RELEASE_SETTINGS,
+    );
+    this.#promptCacheKeepAlive.configure(
+      snapshot.values.promptCacheKeepAlive ?? DEFAULT_PROMPT_CACHE_KEEPALIVE_SETTINGS,
     );
     this.#appliedPreferenceRevision = snapshot.revision;
   }
@@ -1584,6 +1655,9 @@ export class AppServerHost {
       // Stop replacement waiters before waiting for their tracked Host operations.
       this.#externalSteering.close();
       await this.#desktopRequests.drain();
+      this.#unsubscribeKeepAliveWatches?.();
+      this.#unsubscribeKeepAliveWatches = undefined;
+      this.#promptCacheKeepAlive.stop();
       this.#externalRuntime.idleRelease.stop();
       await this.#externalRuntime.idleRelease.drain();
       await this.#pluginLoading;

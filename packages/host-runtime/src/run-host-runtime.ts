@@ -236,6 +236,7 @@ export async function prepareDelegationRuntime(input: {
     api: registry,
     watchApi: registry,
     governanceApi: registry,
+    keepAliveApi: registry,
     inventory,
   });
   const externalServer = await startExternalClients(
@@ -296,6 +297,7 @@ async function startExternalClients(
     api: registry,
     watchApi: registry,
     governanceApi: registry,
+    keepAliveApi: registry,
     events,
     inventory,
   });
@@ -454,16 +456,19 @@ export async function runHostRuntime(input: {
               ...shared,
               ...installedHarnessPluginOptions(delegationEnvironment, false, input.hostRuntimeUrl),
               onDelegationApi,
+              delegationWatchObserver: registry,
               ...(updateCoordinator ? { updateCoordinator } : {}),
               ...(consoleOpener ? { consoleOpener } : {}),
               ...(webOpener ? { webOpener } : {}),
             });
+            registry.setKeepAliveHandler(host.promptCacheKeepAliveApi);
             return await runWithConsoleControl(
               host,
               consoleOpener !== undefined,
               delegationEnvironment,
             );
           } finally {
+            registry.setKeepAliveHandler(undefined);
             await official.close();
           }
         }
@@ -490,7 +495,9 @@ export async function runHostRuntime(input: {
             arguments: input.arguments,
             // Every Remote Control client shares this backend and Mapping Store.
             onDelegationApi: (api) => registry.register(api, { harnessCatalog: true }),
+            delegationWatchObserver: registry,
           });
+          registry.setKeepAliveHandler(host.promptCacheKeepAliveApi);
           listener = createRemoteAppServerWebSocketListener({
             socketPath: remoteControlPlan.pipePath,
             diagnosticOutput: process.stderr,
@@ -595,7 +602,9 @@ export async function runHostRuntime(input: {
           sharedDelegation = api;
           return registry.register(api, { harnessCatalog: true });
         },
+        delegationWatchObserver: registry,
       });
+      registry.setKeepAliveHandler(externalHost.promptCacheKeepAliveApi);
       const externalRunning = externalHost.run();
       const sharedListener = createRemoteAppServerWebSocketListener({
         socketPath: sharedThreadSocketPath(delegationEnvironment),

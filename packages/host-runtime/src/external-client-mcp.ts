@@ -108,18 +108,15 @@ const TOOLS: Tool[] = [
   {
     name: "delegate_start",
     description:
-      "Start a task in a new Thread and return at once. Without parentThread the work belongs to this client and cwd is required. worktree creates a new branch and isolated Git checkout on this Host from the required absolute cwd; base defaults to its HEAD. Returns worktree {path, branch, base}; failures after creation retain it in error details.worktree. watch=true watches the Thread after starting and returns watch (including notRegistered if registration fails); without parentThread, notifications go to this client's event log (events_poll or SSE).",
+      "Start a task in a new Thread and return at once. Specify harnessId directly, or pass tier (deep/light/review) to route via the configured planner-neutral profile. Without parentThread the work belongs to this client and cwd is required. worktree creates a new branch and isolated Git checkout on this Host from the required absolute cwd; base defaults to its HEAD (or set includeUncommitted=true to snapshot uncommitted tracked edits via git stash create). Returns worktree {path, branch, base}; failures after creation retain it in error details.worktree. scope declares allowed project-relative paths (concurrent write overlaps are refused with SCOPE_CONFLICT); checks lists shell commands for thread_verify. watch=true watches the Thread after starting and returns watch.",
     inputSchema: {
       type: "object",
       properties: {
-        harnessId: string(
-          "Harness id from harness_list (optional when tier is provided; overrides tier route)",
-        ),
+        harnessId: string("Harness id from harness_list (optional when tier is provided)"),
         tier: {
           type: "string",
           enum: ["deep", "light", "review"],
-          description:
-            "Optional task tier routed through planner-neutral profiles (deep, light, review)",
+          description: "Task tier routed via the active delegation routing profile",
         },
         profile: string("Explicit routing profile name when using tier"),
         task: string("The full task text"),
@@ -139,7 +136,7 @@ const TOOLS: Tool[] = [
         checks: {
           type: "array",
           items: { type: "string" },
-          description: "Verification shell commands declared for the workspace",
+          description: "Verification shell commands run inside the workspace by thread_verify",
         },
         acceptance: string("Acceptance criteria shown to the delegated executor"),
         allowNestedDelegation: {
@@ -198,15 +195,17 @@ const TOOLS: Tool[] = [
   {
     name: "delegate_routing",
     description:
-      "Inspect or update planner-neutral tiered routing profiles (deep/light/review -> harnessId[:model][@thinking]).",
+      "Inspect or update planner-neutral tiered routing profiles (deep/light/review -> harness[:model][@thinking]) stored in user or project routing configuration.",
     inputSchema: {
       type: "object",
       properties: {
         action: { type: "string", enum: ["show", "set", "unset"] },
-        key: string("Settable key for set/unset (e.g. profile, profiles.thread16.deep)"),
-        value: string("Value for set"),
-        cwd: string("Workspace path used to resolve project .codexhost/delegation-routing.json"),
-        planner: string("Planner Harness ID for show"),
+        key: string(
+          "Setting key for set/unset, e.g. profiles.thread16.deep or plannerProfiles.codex",
+        ),
+        value: string("Setting value for set, e.g. claude-code:opus@high or deepseek-harness"),
+        cwd: string("Project workspace path for project-level routing lookup or writes"),
+        planner: string("Planner Harness id for show"),
         profile: string("Explicit profile name for show"),
         user: {
           type: "boolean",
@@ -527,6 +526,25 @@ const TOOLS: Tool[] = [
       required: ["thread"],
     },
     call: (args) => ({ route: "/v1/thread/discard", body: { threadId: threadId(args) } }),
+  },
+  {
+    name: "thread_keepalive",
+    description:
+      "Inspect or toggle Host-managed 55-minute prompt-cache keep-alive for idle planner Threads waiting on watched delegated children.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["status", "on", "off"] },
+        thread: string("Optional Thread id to scope status/on/off"),
+      },
+    },
+    call: (args) => ({
+      route: "/v1/thread/keepalive",
+      body: {
+        ...(args.action !== undefined ? { action: text(args, "action", true) } : {}),
+        ...(args.thread !== undefined ? { threadId: threadId(args) } : {}),
+      },
+    }),
   },
   {
     name: "events_poll",

@@ -35,7 +35,7 @@ const PREVIOUS_MANAGED_DIGESTS: readonly string[] = [
   "75eb0ea22c8e3ce875a62133c10d62fedacf381e25202d01688210dd951324c1",
   // Fork v13, before the content split with CLI help.
   "41c2672e34b7a52dee9111f8284a4261b4dbcd42908262dcc814b323bb278e59",
-  // v15, before tiered routing, scope locks, and worktree verify/apply/discard.
+  // v15, before tiered routing, scope/check governance, worktree apply/discard, and keep-alive.
   "1ff56f80948aae392c908ae87e7c3763d329c60fd305c4b1f1a29cf32b8f93a3",
 ];
 
@@ -97,7 +97,9 @@ Do not delegate recursively when running as a governed executor
 
 Then choose the next action from the user's request: send a follow-up, cancel,
 read now, answer a pending question, wait for a bounded period, check later, or
-watch it so the Host notifies this Thread once when it stops or needs input.
+watch it so the Host notifies this Thread once when it stops or needs input
+(while watched children run, the Host keeps idle Claude Code prompt caches warm
+automatically; inspect or toggle with \`thread keepalive\`).
 You can also leave it running. A watch notification
 reports execution state only; read the Thread before judging or reporting its
 work. For governed worktree tasks, run \`thread verify <thread>\` (or pass \`--auto-verify true\` with \`--watch true\`) to run checks

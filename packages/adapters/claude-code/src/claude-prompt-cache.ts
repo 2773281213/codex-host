@@ -1,5 +1,20 @@
 import type { HostUsage } from "@codexhost/harness-adapter";
 
+/** Minimal prompt sent on an ephemeral forked query to refresh Claude's 1-hour cache prefix. */
+export const CLAUDE_PROMPT_CACHE_KEEPALIVE_PROMPT =
+  "codexhost prompt-cache keep-alive: no action is needed. Reply with the single word OK.";
+
+/**
+ * A warm prefix is read rather than rewritten; writing more cached prefix than was read
+ * indicates the entry had already lapsed (for example under a 5-minute TTL).
+ */
+export function isColdPromptCache(usage: {
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+}): boolean {
+  return usage.cacheCreationInputTokens > usage.cacheReadInputTokens;
+}
+
 /** Main-session native timestamps survive Renderer reloads and Session reopening. */
 export function lastClaudeAssistantResponseUnix(messages: readonly unknown[]): number | undefined {
   let latest: number | undefined;

@@ -1,14 +1,15 @@
-import type { DelegationTier } from "@codexhost/shared-contracts";
+import type { ThreadExportInput, ThreadExportResult } from "./delegation-thread-export.js";
 import type { DelegationCheckResult, DelegationVerificationStatus } from "./delegation-checks.js";
 import type { DelegationIntegrationState } from "./delegation-governance-store.js";
+import type { DelegationTier } from "./delegation-policy.js";
 import type { DelegationRoutingConfig } from "./delegation-routing.js";
-import type { ThreadExportInput, ThreadExportResult } from "./delegation-thread-export.js";
 import type {
   ThreadApplyResult,
   ThreadDiscardResult,
   ThreadVerifyResult,
 } from "./delegation-worktree-lifecycle.js";
 import type { DelegationWorktree } from "./delegation-worktree.js";
+import type { PromptCacheKeepAliveStatus } from "./prompt-cache-keepalive.js";
 import type { JsonObject, JsonValue, RoutedHarnessId } from "@codexhost/protocol-core";
 import type {
   HarnessInspection,
@@ -122,7 +123,7 @@ export interface DelegationThreadSnapshot {
   refs?: string[];
   /** Empty when the Thread has no unanswered questions. */
   pendingQuestions?: DelegationPendingQuestion[];
-  /** Present for Threads started with tier/scope/checks/worktree governance. */
+  /** Omitted unless this Thread was started with governance metadata or an isolated worktree. */
   governance?: DelegationGovernanceSummary;
 }
 
@@ -144,7 +145,7 @@ export interface DelegationStartInput {
   profile?: string;
   /** Project-relative file or directory paths this delegation may modify. */
   scope?: string[];
-  /** Shell commands declared for verification inside the workspace/worktree. */
+  /** Shell commands run inside the workspace/worktree during `thread verify`. */
   checks?: string[];
   /** Acceptance criteria appended to the governed task instructions. */
   acceptance?: string;
@@ -152,9 +153,9 @@ export interface DelegationStartInput {
   allowNestedDelegation?: boolean;
   /** Caller's CODEXHOST_DELEGATION_ROLE value forwarded by the CLI/listener for recursion checks. */
   callerRole?: string;
-  /** Resolved Git repository root of the source workspace, used for scope locks. */
+  /** Resolved Git repository root of the source workspace, used for scope locks and patch apply. */
   sourceRepoRoot?: string;
-  /** Worktree metadata created prior to starting the child Thread, persisted in governance. */
+  /** Worktree metadata created prior to starting the child Thread, persisted for verify/apply/discard. */
   worktreeMetadata?: DelegationWorktree;
 }
 
@@ -417,6 +418,11 @@ export interface ThreadDiscardInput {
   threadId: string;
 }
 
+export interface ThreadKeepAliveInput {
+  action?: "status" | "on" | "off";
+  threadId?: string;
+}
+
 /** Optional governance API: tiered routing profiles, verification checks, and worktree apply/discard. */
 export interface DelegationGovernanceApi {
   routingShow(input?: DelegationRoutingShowInput): Promise<DelegationRoutingConfig>;
@@ -425,6 +431,11 @@ export interface DelegationGovernanceApi {
   verifyThread(input: ThreadVerifyInput): Promise<ThreadVerifyResult>;
   applyThread(input: ThreadApplyInput): Promise<ThreadApplyResult>;
   discardThread(input: ThreadDiscardInput): Promise<ThreadDiscardResult>;
+}
+
+/** Optional Host-managed prompt-cache keep-alive inspection and toggle API. */
+export interface PromptCacheKeepAliveApi {
+  keepAlive(input?: ThreadKeepAliveInput): Promise<PromptCacheKeepAliveStatus>;
 }
 
 export interface DelegationControlApi {

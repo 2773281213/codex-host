@@ -11,6 +11,7 @@ import {
 } from "./delegation-routing-controls.js";
 import { mountIdleReleaseControls } from "./idle-release-controls.js";
 import type { LoadedSessionsClient } from "./loaded-sessions-table.js";
+import { mountPromptCacheKeepAliveControls } from "./prompt-cache-keepalive-controls.js";
 import {
   createPreferenceGroup,
   createPreferenceItem,
@@ -61,10 +62,12 @@ export function createAppearanceSettingsPage(
 
       context.content.append(heading, description, group);
       const disposeIdleRelease = mountIdleReleaseControls(context, messages, getHostClient);
+      const disposeKeepAlive = mountPromptCacheKeepAliveControls(context, messages);
       const disposeRouting = mountDelegationRoutingControls(context, messages, getHostClient);
       return () => {
         ownerWindow.removeEventListener(REASONING_SOFT_WRAP_CHANGE_EVENT, sync);
         disposeRouting();
+        disposeKeepAlive();
         disposeIdleRelease();
       };
     },

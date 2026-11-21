@@ -10,12 +10,14 @@ import { startAgentGroupSync } from "./agent-group-sync.js";
 import { getSharedAgentGroupPreferenceStore } from "./agent-group-preference.js";
 import { installRendererHarnessPreferenceSync } from "./renderer-harness-preferences.js";
 import { installIdleReleasePreferenceSync } from "./renderer-idle-release-preference.js";
+import { installPromptCacheKeepAlivePreferenceSync } from "./renderer-prompt-cache-keepalive-preference.js";
 import { createRendererModelClient, type RendererModelClient } from "./renderer-model-client.js";
 import coloredBrandCss from "./renderer-brand-mark.css";
 import accountsCss from "./settings/accounts.css";
 import { RendererSettingsPageScope, type RendererSettingsPageDefinition } from "./settings/core.js";
 import { mountDelegationRoutingControls } from "./settings/delegation-routing-controls.js";
 import { mountIdleReleaseControls } from "./settings/idle-release-controls.js";
+import { mountPromptCacheKeepAliveControls } from "./settings/prompt-cache-keepalive-controls.js";
 import {
   resolveRendererSettingsLocale,
   rendererSettingsMessages,
@@ -54,15 +56,20 @@ function resourcesPage(
     icon: "settings",
     mount(context) {
       const idleRelease = installIdleReleasePreferenceSync(window);
+      const keepAlive = installPromptCacheKeepAlivePreferenceSync(window);
       const disposeControls = mountIdleReleaseControls(context, messages, () => client);
+      const disposeKeepAlive = mountPromptCacheKeepAliveControls(context, messages);
       const disposeRouting = mountDelegationRoutingControls(context, messages, () => client);
       const preferences = installRendererHarnessPreferenceSync(window);
       preferences.connect("local", client);
       idleRelease.connect(client);
+      keepAlive.connect(client);
       return () => {
         disposeRouting();
+        disposeKeepAlive();
         disposeControls();
         preferences.dispose();
+        keepAlive.dispose();
         idleRelease.dispose();
       };
     },

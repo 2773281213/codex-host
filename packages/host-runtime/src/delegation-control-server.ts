@@ -11,10 +11,12 @@ import {
   type DelegationWatchApi,
   type HarnessInspectInput,
   type HarnessListInput,
+  type PromptCacheKeepAliveApi,
   type ThreadAnswerInput,
   type ThreadApplyInput,
   type ThreadCancelInput,
   type ThreadDiscardInput,
+  type ThreadKeepAliveInput,
   type ThreadListInput,
   type ThreadSendInput,
   type ThreadReadInput,
@@ -105,6 +107,15 @@ function governanceApi(api: DelegationGovernanceApi | undefined): DelegationGove
   return api;
 }
 
+function keepAliveApi(api: PromptCacheKeepAliveApi | undefined): PromptCacheKeepAliveApi {
+  if (!api)
+    throw new DelegationControlError(
+      "UNSUPPORTED",
+      "This Runtime does not support prompt-cache keep-alive",
+    );
+  return api;
+}
+
 /** The Turn already started, so a watch failure is reported beside it, not thrown. */
 function watchStartedTurn(watches: DelegationWatchApi, input: ThreadWatchInput) {
   return watches.watch(input).catch((error: unknown) => ({
@@ -153,6 +164,7 @@ export async function routeDelegationRequest(
     api: DelegationControlApi;
     watchApi?: DelegationWatchApi;
     governanceApi?: DelegationGovernanceApi;
+    keepAliveApi?: PromptCacheKeepAliveApi;
     inventory?: HostInventory;
   },
   route: string | undefined,
@@ -237,6 +249,8 @@ export async function routeDelegationRequest(
       return governanceApi(handlers.governanceApi).discardThread(
         body as unknown as ThreadDiscardInput,
       );
+    case "/v1/thread/keepalive":
+      return keepAliveApi(handlers.keepAliveApi).keepAlive(body as unknown as ThreadKeepAliveInput);
     case "/v1/thread/send":
       return body.watchTimeoutMs === undefined
         ? handlers.api.send(body as unknown as ThreadSendInput)
@@ -286,6 +300,7 @@ export async function startDelegationControlServer(input: {
   api: DelegationControlApi;
   watchApi?: DelegationWatchApi;
   governanceApi?: DelegationGovernanceApi;
+  keepAliveApi?: PromptCacheKeepAliveApi;
   inventory?: HostInventory;
 }): Promise<DelegationControlServer> {
   const server = createServer((request, response) => {

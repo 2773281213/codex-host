@@ -81,6 +81,9 @@ export class HarnessPreferencesStore {
         if (operation.kind === "idleRelease") {
           if (!request.initializeOnly || values.idleRelease === undefined)
             values.idleRelease = operation.value;
+        } else if (operation.kind === "promptCacheKeepAlive") {
+          if (!request.initializeOnly || values.promptCacheKeepAlive === undefined)
+            values.promptCacheKeepAlive = operation.value;
         } else if (operation.kind === "favorites") {
           if (!request.initializeOnly || values.favorites[operation.harnessId] === undefined)
             values.favorites[operation.harnessId] = [...new Set(operation.modelIds)];

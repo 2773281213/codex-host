@@ -105,6 +105,7 @@ export type {
   OpenSessionInput,
   PermissionModeSelectCommand,
   PermissionModeSelectCompleted,
+  PromptCacheRefreshResult,
   ResumeSessionInput,
   RollbackLastTurnSessionInput,
   SessionFaultedEvent,

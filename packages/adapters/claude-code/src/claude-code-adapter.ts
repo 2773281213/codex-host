@@ -7,6 +7,7 @@ import { claudeUsageHistory, type ClaudeUsageRecord } from "./claude-usage.js";
 import { createClaudeUsageStatistics } from "./claude-usage-statistics.js";
 import {
   claudePromptCacheIndicators,
+  isColdPromptCache,
   lastClaudeAssistantResponseUnix,
 } from "./claude-prompt-cache.js";
 import { randomUUID } from "node:crypto";
@@ -57,6 +58,7 @@ import {
   type OpenSessionInput,
   type PermissionModeSelectCommand,
   type PermissionModeSelectCompleted,
+  type PromptCacheRefreshResult,
   type HostThreadSnapshot,
   type ThinkingSelectCommand,
   type ThinkingSelectCompleted,
@@ -709,6 +711,7 @@ class ClaudeHarnessSession implements HarnessSession {
   #calibratedOutputTokens = 0;
   #calibratedCostUsd = 0;
   #contextRefreshInFlight: Promise<void> | null = null;
+  #promptCacheRefreshInFlight: Promise<HarnessResult<PromptCacheRefreshResult>> | null = null;
   #contextRefreshPending: ContextUsageRefreshRequest | null = null;
   #contextRefreshWake: (() => void) | null = null;
   #contextUsageFreshUntilMs = 0;
@@ -1379,6 +1382,120 @@ class ClaudeHarnessSession implements HarnessSession {
       CONTEXT_USAGE_RETRY_DELAYS_MS,
     );
     await this.#contextRefreshInFlight;
+  }
+
+  refreshPromptCache(): Promise<HarnessResult<PromptCacheRefreshResult>> {
+    if (this.#promptCacheRefreshInFlight) return this.#promptCacheRefreshInFlight;
+    const task = this.#refreshPromptCache().finally(() => {
+      if (this.#promptCacheRefreshInFlight === task) this.#promptCacheRefreshInFlight = null;
+    });
+    this.#promptCacheRefreshInFlight = task;
+    return task;
+  }
+
+  async #refreshPromptCache(): Promise<HarnessResult<PromptCacheRefreshResult>> {
+    if (this.#phase !== "open") {
+      return {
+        ok: false,
+        error: {
+          code: "invalidState",
+          message: "Claude Code Session is not open",
+          retryable: false,
+        },
+      };
+    }
+    if (
+      this.#active !== null ||
+      this.#acceptingTurn ||
+      this.#configurationTask !== null ||
+      this.#readingHistory
+    ) {
+      return {
+        ok: false,
+        error: {
+          code: "sessionBusy",
+          message: "Claude Code Session is busy; prompt-cache refresh skipped",
+          retryable: true,
+        },
+      };
+    }
+    if (!this.#state.nativeRef || isPendingClaudeSession(this.#state.nativeRef)) {
+      return {
+        ok: false,
+        error: {
+          code: "invalidState",
+          message: "Claude Code Session has no persisted native history to refresh",
+          retryable: false,
+        },
+      };
+    }
+    let transport: ClaudeTurnTransport;
+    try {
+      transport = await this.#ensureTransport();
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code: "nativeFailure",
+          message: error instanceof Error ? error.message : String(error),
+          retryable: true,
+        },
+      };
+    }
+    if (this.#phase !== "open") {
+      return {
+        ok: false,
+        error: {
+          code: "invalidState",
+          message: "Claude Code Session closed before prompt-cache refresh",
+          retryable: false,
+        },
+      };
+    }
+    if (typeof transport.refreshPromptCache !== "function") {
+      return {
+        ok: false,
+        error: {
+          code: "unsupported",
+          message: "Claude Code transport does not support prompt-cache refresh",
+          retryable: false,
+        },
+      };
+    }
+    // Cache lifetime starts when the reading request begins, not when it completes.
+    const startedAtUnix = Math.floor(Date.now() / 1000);
+    try {
+      const usage = await transport.refreshPromptCache();
+      const coldCache = isColdPromptCache(usage);
+      this.#lastAssistantResponseAtUnix = startedAtUnix;
+      const composerIndicators = claudePromptCacheIndicators(
+        this.#accountCreditsSupported,
+        this.#lastAssistantResponseAtUnix,
+      );
+      if (this.#phase === "open" && composerIndicators.length > 0) {
+        this.#mergeAndPublishUsage({ composerIndicators }, undefined);
+      }
+      return {
+        ok: true,
+        value: {
+          refreshedAtUnix: startedAtUnix,
+          cacheReadInputTokens: usage.cacheReadInputTokens,
+          cacheCreationInputTokens: usage.cacheCreationInputTokens,
+          ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
+          ...(usage.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
+          coldCache,
+        },
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code: "nativeFailure",
+          message: error instanceof Error ? error.message : String(error),
+          retryable: true,
+        },
+      };
+    }
   }
 
   blocksRollback(sessionId: string): boolean {

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { idleReleaseSettingsSchema } from "./idle-release.js";
+import { promptCacheKeepAliveSettingsSchema } from "./prompt-cache-keepalive.js";
 import { harnessModelRefSchema, harnessThinkingOptionIdSchema } from "./harness-models.js";
 import { harnessPermissionModeIdSchema } from "./harness-permission-modes.js";
 import { harnessIdSchema } from "./ids.js";
@@ -26,6 +27,7 @@ export const newThreadDefaultsSchema = z.strictObject({
 const modelId = z.string().min(1).max(1024);
 export const harnessPreferenceValuesSchema = z.strictObject({
   idleRelease: idleReleaseSettingsSchema.optional(),
+  promptCacheKeepAlive: promptCacheKeepAliveSettingsSchema.optional(),
   favorites: z.record(preferenceHarnessKey, z.array(modelId).max(2048)).default({}),
   newThread: newThreadDefaultsSchema.optional(),
 });
@@ -39,6 +41,10 @@ export const harnessPreferenceGetSchema = z.strictObject({
 });
 export const harnessPreferenceOperationSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("idleRelease"), value: idleReleaseSettingsSchema }),
+  z.strictObject({
+    kind: z.literal("promptCacheKeepAlive"),
+    value: promptCacheKeepAliveSettingsSchema,
+  }),
   z.strictObject({
     kind: z.literal("favorite"),
     harnessId: harnessIdSchema,

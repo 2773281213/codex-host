@@ -18,6 +18,7 @@ import {
 } from "./slash-commands.js";
 import { projectClaudeAccountUsage } from "./account-usage.js";
 
+import { CLAUDE_PROMPT_CACHE_KEEPALIVE_PROMPT } from "./claude-prompt-cache.js";
 import { resolveClaudeCodeExecutable, withNodeRuntimeOnPath } from "./command.js";
 import {
   mergeClaudeModelPickerOptions,
@@ -51,6 +52,7 @@ import {
   type ClaudeInteractionResponse,
   type ClaudeModelInspector,
   type ClaudePlanLimitEvent,
+  type ClaudePromptCacheRefreshUsage,
   type ClaudeQuestion,
   type ClaudeTransportContextUsage,
   type ClaudeTransportTurnResult,
@@ -697,6 +699,121 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
     const activeQuery = this.#query;
     if (!this.#started || !activeQuery) return null;
     return parseContextUsage(await activeQuery.getContextUsage({ detail }));
+  }
+
+  async refreshPromptCache(): Promise<ClaudePromptCacheRefreshUsage> {
+    if (!this.#started || !this.#query || this.#closePromise) {
+      throw new Error("Claude SDK transport is not active");
+    }
+    if (this.#active !== null) {
+      throw new Error("Claude SDK transport has an active Turn");
+    }
+    const executable = resolveClaudeCodeExecutable({
+      ...(this.#command ? { command: this.#command } : {}),
+      environment: this.#environment,
+    });
+    const thinking = claudeThinkingConfiguration(this.#thinkingOptionId);
+    const ephemeralChildren: ChildProcessWithoutNullStreams[] = [];
+    const ephemeralQuery = this.#queryFactory({
+      prompt: CLAUDE_PROMPT_CACHE_KEEPALIVE_PROMPT,
+      options: {
+        cwd: this.#cwd,
+        resume: this.sessionId,
+        forkSession: true,
+        persistSession: false,
+        maxTurns: 1,
+        ...(this.#currentModel ? { model: this.#currentModel } : {}),
+        thinking: thinking.enabled
+          ? { type: "adaptive", display: "summarized" }
+          : { type: "disabled" },
+        ...(thinking.effort ? { effort: thinking.effort } : {}),
+        pathToClaudeCodeExecutable: executable,
+        permissionMode: this.#permissionMode,
+        ...(this.#allowDangerouslySkipPermissions ? { allowDangerouslySkipPermissions: true } : {}),
+        canUseTool: async (_toolName, _input, options) =>
+          denied(options.toolUseID, "Tool execution is disabled during prompt-cache keep-alive"),
+        includePartialMessages: false,
+        env: withNodeRuntimeOnPath({
+          CLAUDE_CODE_ENABLE_TODO_TOOLS: "1",
+          ...this.#environment,
+          CLAUDE_CODE_ENTRYPOINT: SESSION_ENTRYPOINT,
+          CLAUDE_AGENT_SDK_CLIENT_APP: CLIENT_APP,
+        }),
+        spawnClaudeCodeProcess: (options) => {
+          const child = spawn(options.command, options.args, {
+            cwd: options.cwd,
+            env: options.env,
+            signal: options.signal,
+            stdio: ["pipe", "pipe", "pipe"],
+            windowsHide: true,
+            detached: process.platform !== "win32",
+          });
+          ephemeralChildren.push(child);
+          return child;
+        },
+      },
+    });
+    const timeout = rejectAfter(60_000, "Claude SDK prompt-cache keep-alive timed out");
+    try {
+      return await Promise.race([
+        (async () => {
+          let resultMessage: Record<string, unknown> | null = null;
+          for await (const message of ephemeralQuery) {
+            if (isRecord(message) && message.type === "result") {
+              resultMessage = message;
+            }
+          }
+          if (!resultMessage) {
+            throw new Error("Claude SDK prompt-cache keep-alive ended without a result");
+          }
+          if (resultMessage.is_error === true) {
+            const detail =
+              typeof resultMessage.subtype === "string" ? resultMessage.subtype : "error";
+            throw new Error(`Claude SDK prompt-cache keep-alive failed (${detail})`);
+          }
+          const usage = isRecord(resultMessage.usage) ? resultMessage.usage : {};
+          const cacheReadInputTokens =
+            typeof usage.cache_read_input_tokens === "number" &&
+            Number.isFinite(usage.cache_read_input_tokens)
+              ? usage.cache_read_input_tokens
+              : 0;
+          const cacheCreationInputTokens =
+            typeof usage.cache_creation_input_tokens === "number" &&
+            Number.isFinite(usage.cache_creation_input_tokens)
+              ? usage.cache_creation_input_tokens
+              : 0;
+          const inputTokens =
+            typeof usage.input_tokens === "number" && Number.isFinite(usage.input_tokens)
+              ? usage.input_tokens
+              : undefined;
+          const outputTokens =
+            typeof usage.output_tokens === "number" && Number.isFinite(usage.output_tokens)
+              ? usage.output_tokens
+              : undefined;
+          return {
+            cacheReadInputTokens,
+            cacheCreationInputTokens,
+            ...(inputTokens !== undefined ? { inputTokens } : {}),
+            ...(outputTokens !== undefined ? { outputTokens } : {}),
+          };
+        })(),
+        timeout.promise,
+      ]);
+    } finally {
+      timeout.cancel();
+      ephemeralQuery.close();
+      for (const child of ephemeralChildren) {
+        if (!processExited(child)) {
+          await closeClaudeProcessGroup(child, this.#closeTimeoutMs).catch(() => {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              /* already exited */
+            }
+          });
+        }
+      }
+    }
   }
 
   getPermissionMode(): ClaudePermissionMode {
