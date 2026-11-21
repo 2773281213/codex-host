@@ -219,6 +219,7 @@ export async function prepareDelegationRuntime(input: {
       path.join(codexhostDataDirectory(input.environment), "thread-refs"),
     ),
     clientEvents: events,
+    environment: input.environment,
   });
   const token = randomBytes(32).toString("hex");
   const inventory = new HostInventory(input.environment);
@@ -226,6 +227,7 @@ export async function prepareDelegationRuntime(input: {
     token,
     api: registry,
     watchApi: registry,
+    governanceApi: registry,
     inventory,
   });
   const externalServer = await startExternalClients(
@@ -285,6 +287,7 @@ async function startExternalClients(
   const route = externalClientRouter({
     api: registry,
     watchApi: registry,
+    governanceApi: registry,
     events,
     inventory,
   });

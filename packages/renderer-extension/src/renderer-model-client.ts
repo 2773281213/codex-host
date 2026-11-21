@@ -48,6 +48,14 @@ import {
   DELEGATION_READ_METHOD,
   delegationReadParamsSchema,
   type DelegationReadParams,
+  DELEGATION_ROUTING_GET_METHOD,
+  DELEGATION_ROUTING_SET_METHOD,
+  delegationRoutingGetParamsSchema,
+  delegationRoutingSetParamsSchema,
+  delegationRoutingSnapshotSchema,
+  type DelegationRoutingGetParams,
+  type DelegationRoutingSetParams,
+  type DelegationRoutingSnapshot,
   REMOTE_SSH_SETUP_METHOD,
   remoteSshSetupResultSchema,
   remoteSshSetupParamsSchema,
@@ -277,6 +285,8 @@ export interface RendererModelClient extends Partial<RendererSessionImportClient
   getHarnessPreferences?(scope?: string): Promise<HarnessPreferenceSnapshot>;
   patchHarnessPreferences?(input: HarnessPreferencePatch): Promise<HarnessPreferenceSnapshot>;
   subscribeHarnessPreferences?(listener: () => void): () => void;
+  getDelegationRouting?(input?: DelegationRoutingGetParams): Promise<DelegationRoutingSnapshot>;
+  setDelegationRouting?(input: DelegationRoutingSetParams): Promise<DelegationRoutingSnapshot>;
   installation?(input: HarnessInstallationParams): Promise<HarnessInstallationState>;
   getHarnessDisplayCapabilities?(): Promise<{ events: boolean }>;
   subscribeHarnessDisplaySettings?(listener: () => void): () => void;
@@ -561,6 +571,22 @@ export function createRendererModelClient(
         await manager.sendRequest(
           HARNESS_PREFERENCES_PATCH_METHOD,
           harnessPreferencePatchSchema.parse(input),
+        ),
+      );
+    },
+    async getDelegationRouting(input: DelegationRoutingGetParams = {}) {
+      return delegationRoutingSnapshotSchema.parse(
+        await manager.sendRequest(
+          DELEGATION_ROUTING_GET_METHOD,
+          delegationRoutingGetParamsSchema.parse(input),
+        ),
+      );
+    },
+    async setDelegationRouting(input: DelegationRoutingSetParams) {
+      return delegationRoutingSnapshotSchema.parse(
+        await manager.sendRequest(
+          DELEGATION_ROUTING_SET_METHOD,
+          delegationRoutingSetParamsSchema.parse(input),
         ),
       );
     },

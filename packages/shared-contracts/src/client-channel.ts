@@ -1,5 +1,9 @@
 import { z } from "zod";
 import { DESKTOP_EXTENSION_MANAGEMENT_METHODS } from "./desktop-extension-management.js";
+import {
+  DELEGATION_ROUTING_GET_METHOD,
+  DELEGATION_ROUTING_SET_METHOD,
+} from "./delegation-routing.js";
 import { harnessModelRefSchema, harnessThinkingOptionIdSchema } from "./harness-models.js";
 import { harnessPermissionModeIdSchema } from "./harness-permission-modes.js";
 import { THREAD_ARCHIVE_CONFIRM_METHOD } from "./thread-archive-confirm.js";
@@ -18,6 +22,8 @@ export const CLIENT_CHANNEL_METHODS = [
   "codexhost/harness/display-settings/capabilities",
   "codexhost/harness/preferences/get",
   "codexhost/harness/preferences/patch",
+  DELEGATION_ROUTING_GET_METHOD,
+  DELEGATION_ROUTING_SET_METHOD,
   "thread/list",
   "codexhost/thread/catalog/read",
   "thread/read",

@@ -31,8 +31,9 @@ List Harnesses available in the active Runtime.`,
 Read available Models, native defaults, Thinking options, and configuration capabilities.
 Use the returned Model and Thinking IDs for explicit selections.
 For Codex Ultrafast, use the ID of the advertised "<Model> · Ultrafast" entry as --model. Pass the Thinking option separately, for example --thinking max if the entry supports it. For Codex Fast, use fastModel.id from --format json.`,
-  "delegate start": `codexhost delegate start --harness <id> (--task <text> | --task-file <path|->) [--task-name <name>] [--cwd <path>] [--worktree <branch>] [--base <ref>] [--model <opaque-ref>] [--thinking <option-id>] [--parent-thread <thread>] [--request-id <id>] [--ref <uri>]... [--watch true|false] [--watch-timeout-ms <n>] [--format json|compact|text]
+  "delegate start": `codexhost delegate start (--harness <id> | --tier <deep|light|review>) (--task <text> | --task-file <path|->) [--profile <name>] [--task-name <name>] [--cwd <path>] [--worktree <branch>] [--base <ref>] [--model <opaque-ref>] [--thinking <option-id>] [--parent-thread <thread>] [--request-id <id>] [--ref <uri>]... [--watch true|false] [--watch-timeout-ms <n>] [--format json|compact|text]
 Create an independent child Thread, submit the task, and return immediately.
+Specify --harness directly, or --tier deep|light|review to route via the configured planner-neutral routing profile (see codexhost delegate routing --help). --harness overrides the tier's default Harness.
 --task and --task-file are mutually exclusive. --task-file reads UTF-8 from a file, or stdin for -; maximum 262144 bytes (256 KiB) before removing one final LF or CRLF. Other whitespace and special characters are preserved; empty/whitespace-only input is rejected. Terminal stdin is rejected: use a quoted heredoc (<<'EOF') or a pipe. --task is unchanged.
 --task-name supplies a short subtask name (1-120 characters); otherwise the first task line is used.
 The child title is the subtask name only, fixed at creation; parent titles are not appended. Existing Threads are not renamed.
@@ -47,6 +48,12 @@ Reuse --request-id for an idempotent retry. Identical recent parent/target/task/
 --ref records where the work came from, such as an issue URL; repeat it for several. Absolute URIs only, at most 16 per Thread; credentials in a URI are removed. A child inherits its parent Thread's references.
 An external client that omits --parent-thread starts the work as itself (parent client:<name>) and must pass --cwd.
 The response confirms cwd and parent. Use its Thread reference with thread read, wait, send, cancel, or watch.`,
+  "delegate routing": `codexhost delegate routing show [--cwd <path>] [--planner <harness>] [--profile <name>] [--format json|compact|text]
+codexhost delegate routing set <key> <value> [--cwd <path>] [--user true|false] [--format json|compact|text]
+codexhost delegate routing unset <key> [--cwd <path>] [--user true|false] [--format json|compact|text]
+Inspect or update planner-neutral tiered routing profiles (deep/light/review -> harnessId[:model][@thinking]).
+Project settings live in <repo>/.codexhost/delegation-routing.json and override ~/.codexhost/delegation-routing.json (--user true).
+Settable keys: profile, plannerProfiles.<harness>, profiles.<name>.<deep|light|review>, checks.timeoutMinutes, checks.shell, light.maxScopeEntries, light.maxChangedFiles.`,
   "thread send": `codexhost thread send <thread> (--message <text> | --message-file <path|->) [--interrupt] [--steer true|false] [--watch true|false] [--watch-timeout-ms <n>] [--format json|compact|text]
 Start a new Turn in a writable Thread and return after submission.
 --message and --message-file are mutually exclusive. --message-file reads UTF-8 from a file, or stdin for -; maximum 262144 bytes (256 KiB) before removing one final LF or CRLF. Other whitespace and special characters are preserved; empty/whitespace-only input is rejected. Terminal stdin is rejected: use a quoted heredoc (<<'EOF') or a pipe. --message is unchanged.
@@ -116,7 +123,8 @@ export const DELEGATION_HELP = `usage:
   codexhost thread file <thread> --path <file>
   codexhost harness list
   codexhost harness inspect <harness>
-  codexhost delegate start --harness <id> (--task <text> | --task-file <path|->)
+  codexhost delegate start (--harness <id> | --tier <deep|light|review>) (--task <text> | --task-file <path|->)
+  codexhost delegate routing show|set|unset
   codexhost thread send <thread> (--message <text> | --message-file <path|->) [--interrupt] [--steer true|false] [--watch true]
   codexhost thread cancel <thread>
   codexhost thread read <thread>

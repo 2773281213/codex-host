@@ -6,6 +6,7 @@ import {
   DEFAULT_WATCH_TIMEOUT_MS,
   DelegationControlError,
   type DelegationControlApi,
+  type DelegationGovernanceApi,
   type DelegationWatchApi,
 } from "./delegation-types.js";
 import type { ClientEventLog } from "./external-client-events.js";
@@ -71,15 +72,15 @@ function withHttpDefaults(route: string, body: Record<string, unknown>): Record<
           "harness and harnessId must name the same Harness",
         );
       const harnessId = rest.harnessId === undefined ? harness : rest.harnessId;
-      if (harnessId === undefined)
+      if (harnessId === undefined && rest.tier === undefined)
         throw new DelegationControlError("INVALID_ARGUMENT", "harnessId is required");
       // A worktree is created before the Runtime resolves the Harness, so a malformed id must not get that far.
-      if (typeof harnessId !== "string" || harnessId === "")
+      if (harnessId !== undefined && (typeof harnessId !== "string" || harnessId === ""))
         throw new DelegationControlError(
           "INVALID_ARGUMENT",
           "harnessId must be a non-empty string",
         );
-      return { ...rest, harnessId };
+      return { ...rest, ...(harnessId !== undefined ? { harnessId } : {}) };
     }
     case "/v1/thread/read":
       return { view: "result", ...body };
@@ -148,6 +149,7 @@ async function pollEvents(events: ClientEventLog, client: string, body: Record<s
 export function externalClientRouter(handlers: {
   api: DelegationControlApi;
   watchApi?: DelegationWatchApi;
+  governanceApi?: DelegationGovernanceApi;
   events?: ClientEventLog;
   inventory?: HostInventory;
 }): ExternalClientRouter {

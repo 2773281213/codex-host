@@ -40,6 +40,21 @@ export type {
 export { runDelegationCli, DELEGATION_HELP } from "./delegation-cli.js";
 export { DelegationControlRegistry } from "./delegation-control-registry.js";
 export { startDelegationControlServer } from "./delegation-control-server.js";
+export {
+  DEFAULT_DELEGATION_ROUTING,
+  DELEGATION_PROFILE_ENV,
+  SETTABLE_ROUTING_KEYS,
+  applyDelegationRoutingPatch,
+  buildDelegationRoutingConfig,
+  formatDelegationRouteSpec,
+  loadDelegationRoutingConfig,
+  parseDelegationRouteSpec,
+  projectDelegationRoutingPath,
+  readDelegationRoutingSnapshot,
+  userDelegationRoutingPath,
+  writeDelegationRoutingSetting,
+} from "./delegation-routing.js";
+export type { DelegationRoutingConfig, DelegationTierRoute } from "./delegation-routing.js";
 export { installDelegationSkills, CODEXHOST_DELEGATION_SKILL } from "./delegation-skill.js";
 export {
   DELEGATION_CLI_PATH_ENV,

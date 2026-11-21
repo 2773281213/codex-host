@@ -4,6 +4,9 @@ import type { AddressInfo } from "node:net";
 import {
   DelegationControlError,
   type DelegationControlApi,
+  type DelegationGovernanceApi,
+  type DelegationRoutingMutateInput,
+  type DelegationRoutingShowInput,
   type DelegationStartInput,
   type DelegationWatchApi,
   type HarnessInspectInput,
@@ -90,6 +93,15 @@ function watchApi(api: DelegationWatchApi | undefined): DelegationWatchApi {
   return api;
 }
 
+function governanceApi(api: DelegationGovernanceApi | undefined): DelegationGovernanceApi {
+  if (!api)
+    throw new DelegationControlError(
+      "UNSUPPORTED",
+      "This Runtime does not support delegation governance",
+    );
+  return api;
+}
+
 /** The Turn already started, so a watch failure is reported beside it, not thrown. */
 function watchStartedTurn(watches: DelegationWatchApi, input: ThreadWatchInput) {
   return watches.watch(input).catch((error: unknown) => ({
@@ -132,7 +144,12 @@ async function sendWithWatch(
 
 /** The delegation routes shared by the Host control server and the external client listener. */
 export async function routeDelegationRequest(
-  handlers: { api: DelegationControlApi; watchApi?: DelegationWatchApi; inventory?: HostInventory },
+  handlers: {
+    api: DelegationControlApi;
+    watchApi?: DelegationWatchApi;
+    governanceApi?: DelegationGovernanceApi;
+    inventory?: HostInventory;
+  },
   route: string | undefined,
   body: Record<string, unknown>,
 ): Promise<unknown> {
@@ -150,6 +167,18 @@ export async function routeDelegationRequest(
       return handlers.api.listHarnesses(body as HarnessListInput);
     case "/v1/harness/inspect":
       return handlers.api.inspect(body as unknown as HarnessInspectInput);
+    case "/v1/delegate/routing/show":
+      return governanceApi(handlers.governanceApi).routingShow(
+        body as unknown as DelegationRoutingShowInput,
+      );
+    case "/v1/delegate/routing/set":
+      return governanceApi(handlers.governanceApi).routingSet(
+        body as unknown as DelegationRoutingMutateInput,
+      );
+    case "/v1/delegate/routing/unset":
+      return governanceApi(handlers.governanceApi).routingUnset(
+        body as unknown as DelegationRoutingMutateInput,
+      );
     case "/v1/delegate/start": {
       const { worktree, base, ...start } = body;
       return startWithDelegationWorktree(
@@ -217,6 +246,7 @@ export async function startDelegationControlServer(input: {
   token: string;
   api: DelegationControlApi;
   watchApi?: DelegationWatchApi;
+  governanceApi?: DelegationGovernanceApi;
   inventory?: HostInventory;
 }): Promise<DelegationControlServer> {
   const server = createServer((request, response) => {

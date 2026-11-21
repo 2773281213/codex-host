@@ -120,6 +120,7 @@ describe("external client MCP endpoint", () => {
       "harness_list",
       "harness_inspect",
       "delegate_start",
+      "delegate_routing",
       "thread_read",
       "thread_export",
       "thread_file_read",

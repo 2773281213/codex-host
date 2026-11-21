@@ -16,6 +16,8 @@ import {
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  DELEGATION_ROUTING_GET_METHOD,
+  DELEGATION_ROUTING_SET_METHOD,
   THREAD_ARCHIVE_CONFIRM_METHOD,
   clientThreadPinsSchema,
   type ClientThreadSnapshot,
@@ -62,6 +64,8 @@ const METHODS = new Set([
   "codexhost/harness/display-settings/capabilities",
   "codexhost/harness/preferences/get",
   "codexhost/harness/preferences/patch",
+  DELEGATION_ROUTING_GET_METHOD,
+  DELEGATION_ROUTING_SET_METHOD,
   "thread/list",
   "thread/read",
   "thread/turns/list",

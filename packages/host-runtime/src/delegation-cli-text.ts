@@ -63,6 +63,7 @@ export function assertDelegationTextCommand(command: string): void {
     case "harness list":
     case "harness inspect":
     case "delegate start":
+    case "delegate routing":
     case "thread send":
     case "thread cancel":
     case "thread read":

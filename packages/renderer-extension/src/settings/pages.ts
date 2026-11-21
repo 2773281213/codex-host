@@ -35,13 +35,15 @@ import {
   type RendererSessionImportClient,
   type RendererImportedThreadOpener,
 } from "./session-import-page.js";
-import { createAppearanceSettingsPage } from "./appearance-page.js";
+import {
+  createAppearanceSettingsPage,
+  type AppearanceSettingsHostClient,
+} from "./appearance-page.js";
 import {
   createDesktopExtensionsSettingsPage,
   type RendererDesktopExtensionsClient,
 } from "./desktop-extensions-page.js";
 import type { RendererSettingsPluginPagesSource } from "./desktop-extension-settings-pages.js";
-import type { LoadedSessionsClient } from "./loaded-sessions-table.js";
 import { createReleaseNotesElement } from "./release-notes.js";
 import { createAccountsSettingsPage, type RendererCodexAccountClient } from "./accounts-page.js";
 import {
@@ -698,7 +700,7 @@ export function createDefaultRendererSettingsPages(
   getSessionImportClient: (hostId?: string) => RendererSessionImportClient | null = () => null,
   openImportedThread: RendererImportedThreadOpener | null = () =>
     Promise.reject(new Error("Imported Thread navigation is unavailable")),
-  getLoadedSessionsClient: () => LoadedSessionsClient | null = () => null,
+  getLoadedSessionsClient: () => AppearanceSettingsHostClient | null = () => null,
   getRemoteConnections: () => RemoteConnectionsControl | null = () => null,
   requestUsageStatistics: RendererUsageStatisticsRequest = () =>
     Promise.reject(new Error("Local Host connection is unavailable")),

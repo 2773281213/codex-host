@@ -5,6 +5,10 @@ import {
 } from "../renderer-transcript-dom.js";
 import type { RendererSettingsPageDefinition, RendererSettingsPageMountContext } from "./core.js";
 import type { RendererSettingsMessages } from "./localization.js";
+import {
+  mountDelegationRoutingControls,
+  type DelegationRoutingClient,
+} from "./delegation-routing-controls.js";
 import { mountIdleReleaseControls } from "./idle-release-controls.js";
 import type { LoadedSessionsClient } from "./loaded-sessions-table.js";
 import {
@@ -14,9 +18,11 @@ import {
   preferenceId,
 } from "./preference-ui.js";
 
+export type AppearanceSettingsHostClient = LoadedSessionsClient & DelegationRoutingClient;
+
 export function createAppearanceSettingsPage(
   messages: RendererSettingsMessages,
-  getLoadedSessionsClient: () => LoadedSessionsClient | null = () => null,
+  getHostClient: () => AppearanceSettingsHostClient | null = () => null,
 ): RendererSettingsPageDefinition {
   return Object.freeze({
     id: "appearance",
@@ -54,13 +60,11 @@ export function createAppearanceSettingsPage(
       card.append(row.item);
 
       context.content.append(heading, description, group);
-      const disposeIdleRelease = mountIdleReleaseControls(
-        context,
-        messages,
-        getLoadedSessionsClient,
-      );
+      const disposeIdleRelease = mountIdleReleaseControls(context, messages, getHostClient);
+      const disposeRouting = mountDelegationRoutingControls(context, messages, getHostClient);
       return () => {
         ownerWindow.removeEventListener(REASONING_SOFT_WRAP_CHANGE_EVENT, sync);
+        disposeRouting();
         disposeIdleRelease();
       };
     },

@@ -1,3 +1,5 @@
+import type { DelegationTier } from "@codexhost/shared-contracts";
+import type { DelegationRoutingConfig } from "./delegation-routing.js";
 import type { ThreadExportInput, ThreadExportResult } from "./delegation-thread-export.js";
 import type { DelegationWorktree } from "./delegation-worktree.js";
 import type { JsonObject, JsonValue, RoutedHarnessId } from "@codexhost/protocol-core";
@@ -110,6 +112,10 @@ export interface DelegationStartInput {
   thinkingOptionId?: HarnessThinkingOptionId;
   /** Absolute URIs of where the work came from; children inherit them. */
   refs?: string[];
+  /** Optional task tier (`deep`, `light`, `review`) resolved through layered routing profiles. */
+  tier?: DelegationTier;
+  /** Optional explicit routing profile name when using `tier`. */
+  profile?: string;
 }
 
 export interface HarnessInspectInput {
@@ -328,6 +334,34 @@ export interface ThreadWatchListResult {
 export interface DelegationWatchApi {
   watch(input: ThreadWatchInput): Promise<ThreadWatchResult>;
   watches(): Promise<ThreadWatchListResult>;
+}
+
+export interface DelegationRoutingShowInput {
+  cwd?: string;
+  planner?: string;
+  profile?: string;
+}
+
+export interface DelegationRoutingMutateInput {
+  key: string;
+  value?: string;
+  cwd?: string;
+  user?: boolean;
+}
+
+export interface DelegationRoutingMutateResult {
+  file: string;
+  key: string;
+  value?: unknown;
+  removed: boolean;
+  routing: DelegationRoutingConfig;
+}
+
+/** Optional governance API: tiered routing profiles (extended in later PRs with verify/apply/discard). */
+export interface DelegationGovernanceApi {
+  routingShow(input?: DelegationRoutingShowInput): Promise<DelegationRoutingConfig>;
+  routingSet(input: DelegationRoutingMutateInput): Promise<DelegationRoutingMutateResult>;
+  routingUnset(input: DelegationRoutingMutateInput): Promise<DelegationRoutingMutateResult>;
 }
 
 export interface DelegationControlApi {
