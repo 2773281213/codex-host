@@ -224,6 +224,87 @@ it("binds the Desktop 26.1106 model tuple without changing another draft or nati
   expect(findScopedDraftModelBinding(element, "client-new-thread:mac")).toBeNull();
 });
 
+it("binds the Desktop 26.1117 37-slot model tuple and 55-slot collaboration-mode tuple", () => {
+  const original = {
+    modelSettings: { model: "native", reasoningEffort: "medium" },
+    isManuallyChanged: false,
+  };
+  let draft: Record<string, unknown> = original;
+  const update = vi.fn((apply: (value: typeof draft) => typeof draft) => {
+    draft = apply(draft);
+  });
+  const identity = Array<unknown>(14).fill(null);
+  Object.assign(identity, {
+    6: "client-new-thread:win261117",
+    7: "client-new-thread:win261117",
+    9: update,
+    10: original,
+    11: true,
+    12: update,
+    13: { draftSettings: original, isNewThreadDraft: true, updateDraftSettings: update },
+  });
+  const modelSettings = {
+    model: "native",
+    reasoningEffort: "medium",
+    profile: null,
+    isLoading: false,
+  };
+  const context = { usesAccountPreferences: false };
+  const setModel = vi.fn();
+  const modeSettings = {
+    model: "native",
+    reasoning_effort: "medium",
+    developer_instructions: null,
+  };
+  const mode = { mode: "default", settings: modeSettings };
+  const collab = Array<unknown>(55).fill(null);
+  Object.assign(collab, {
+    42: "native",
+    43: "medium",
+    44: modeSettings,
+    47: mode,
+    52: mode,
+    54: { activeMode: mode },
+  });
+  const model = Array<unknown>(37).fill(null);
+  Object.assign(model, {
+    16: null,
+    21: true,
+    24: update,
+    25: false,
+    27: setModel,
+    32: modelSettings,
+    33: setModel,
+    34: context,
+    36: { ...context, modelSettings, setModelAndReasoningEffort: setModel },
+  });
+  const element = {
+    parentElement: null,
+    __reactFiber$test: {
+      updateQueue: { memoCache: { data: [collab, model, identity] } },
+      return: null,
+    },
+  };
+  const binding = findScopedDraftModelBinding(element, "client-new-thread:win261117");
+  expect(binding).toEqual({
+    update,
+    usesAccountPreferences: false,
+    creationModes: [mode],
+  });
+  if (!binding) throw new Error("Missing Desktop 26.1117 draft binding");
+  const writer = createScopedDraftModelWriter();
+  writer.apply("client-new-thread:win261117", binding, "codexhost/claude-code-native");
+  expect(draft.modelSettings).toMatchObject({ model: "codexhost/claude-code-native" });
+  expect(draft.modelSettingsPersistAsDefault).toBe(false);
+  writer.apply("client-new-thread:win261117", binding, null);
+  expect(draft.modelSettings).toBe(original.modelSettings);
+  model[24] = vi.fn();
+  expect(findScopedDraftModelBinding(element, "client-new-thread:win261117")).toBeNull();
+  model[24] = update;
+  model[33] = vi.fn();
+  expect(findScopedDraftModelBinding(element, "client-new-thread:win261117")).toBeNull();
+});
+
 it("keeps drafts independent and restores native settings without default persistence", () => {
   const writer = createScopedDraftModelWriter();
   const original = {

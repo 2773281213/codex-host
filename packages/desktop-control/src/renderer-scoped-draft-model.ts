@@ -63,51 +63,83 @@ export function findScopedDraftModelBinding(
   // The 26.1021 Model hook pairs its current settings mode with this exact
   // draft setter. A stored draft's mode can belong to an earlier Account.
   for (const row of rows) {
-    // Desktop 26.1106 adds one memo slot before the draft/model context.
-    // Accept only the two reviewed layouts and retain their identity checks.
-    const offset = row.length === 25 ? 1 : 0;
-    if (
-      (row.length !== 24 && row.length !== 25) ||
-      row[7 + offset] !== null ||
-      row[10 + offset] !== true ||
-      !updates.has(row[13 + offset] as UpdateDraft)
-    )
+    let matchedUpdate: UpdateDraft | undefined;
+    let matchedUsesAccountPreferences: boolean | undefined;
+    let matchedResult: Draft | null = null;
+    if (row.length === 24 || row.length === 25) {
+      // Desktop 26.1106 adds one memo slot before the draft/model context.
+      const offset = row.length === 25 ? 1 : 0;
+      if (
+        row[7 + offset] !== null ||
+        row[10 + offset] !== true ||
+        !updates.has(row[13 + offset] as UpdateDraft)
+      )
+        continue;
+      const context = row[12 + offset] as Draft | null;
+      const result = row[23 + offset] as Draft | null;
+      if (
+        context &&
+        context === row[21 + offset] &&
+        typeof context.usesAccountPreferences === "boolean" &&
+        result?.usesAccountPreferences === context.usesAccountPreferences &&
+        typeof row[14 + offset] === "function" &&
+        row[14 + offset] === row[20 + offset] &&
+        result.setModelAndReasoningEffort === row[14 + offset]
+      ) {
+        matchedUpdate = row[13 + offset] as UpdateDraft;
+        matchedUsesAccountPreferences = context.usesAccountPreferences;
+        matchedResult = result;
+      }
+    } else if (row.length === 37) {
+      // Desktop 26.1117 expands the Model hook tuple to 37 slots (Luna Reserve
+      // and next-turn setters) and stores the inner context at slot 34.
+      if (row[16] !== null || row[21] !== true || !updates.has(row[24] as UpdateDraft)) continue;
+      const context = row[34] as Draft | null;
+      const result = row[36] as Draft | null;
+      if (
+        context &&
+        typeof row[25] === "boolean" &&
+        context.usesAccountPreferences === row[25] &&
+        result?.usesAccountPreferences === context.usesAccountPreferences &&
+        typeof row[27] === "function" &&
+        row[27] === row[33] &&
+        result.setModelAndReasoningEffort === row[27] &&
+        result.modelSettings === row[32]
+      ) {
+        matchedUpdate = row[24] as UpdateDraft;
+        matchedUsesAccountPreferences = context.usesAccountPreferences;
+        matchedResult = result;
+      }
+    } else {
       continue;
-    const context = row[12 + offset] as Draft | null;
-    const result = row[23 + offset] as Draft | null;
-    if (
-      context &&
-      context === row[21 + offset] &&
-      typeof context.usesAccountPreferences === "boolean" &&
-      result?.usesAccountPreferences === context.usesAccountPreferences &&
-      typeof row[14 + offset] === "function" &&
-      row[14 + offset] === row[20 + offset] &&
-      result.setModelAndReasoningEffort === row[14 + offset]
-    ) {
+    }
+    if (matchedUpdate && matchedUsesAccountPreferences !== undefined && matchedResult) {
       // Each native hook can create its own setter for the same draft atom.
       // Bind through its reviewed draft identity and Model context, not through
       // function identity shared by every hook in the Composer.
-      update ??= row[13 + offset] as UpdateDraft;
-      modes.add(context.usesAccountPreferences);
+      update ??= matchedUpdate;
+      modes.add(matchedUsesAccountPreferences);
       // Background creation receives a new client Thread id. The reviewed
       // collaboration-mode memo retains the originating draft's Model hook.
-      const settings = result.modelSettings as Draft | null;
+      const settings = matchedResult.modelSettings as Draft | null;
       const group = groups.get(row);
       const candidate = group?.[group.indexOf(row) - 1];
-      const mode = candidate?.[44] as Draft | null;
-      const value = candidate?.[51] as Draft | null;
-      if (
-        candidate?.length === 52 &&
-        settings &&
-        candidate[39] === settings.model &&
-        candidate[40] === settings.reasoningEffort &&
-        mode &&
-        mode === candidate[49] &&
-        mode.settings === candidate[41] &&
-        (mode.settings as Draft | null)?.model === settings.model &&
-        value?.activeMode === mode
-      )
-        creationModes.add(mode);
+      const modeOffset = candidate?.length === 55 ? 3 : candidate?.length === 52 ? 0 : -1;
+      if (modeOffset >= 0 && candidate) {
+        const mode = candidate[44 + modeOffset] as Draft | null;
+        const value = candidate[51 + modeOffset] as Draft | null;
+        if (
+          settings &&
+          candidate[39 + modeOffset] === settings.model &&
+          candidate[40 + modeOffset] === settings.reasoningEffort &&
+          mode &&
+          mode === candidate[49 + modeOffset] &&
+          mode.settings === candidate[41 + modeOffset] &&
+          (mode.settings as Draft | null)?.model === settings.model &&
+          value?.activeMode === mode
+        )
+          creationModes.add(mode);
+      }
     }
   }
   const [usesAccountPreferences] = modes;
