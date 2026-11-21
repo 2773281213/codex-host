@@ -10,6 +10,10 @@ import {
   WEB_OPEN_METHOD,
   CREDENTIAL_IMPORTS_METHOD,
   credentialImportsParamsSchema,
+  DELEGATION_ROUTING_GET_METHOD,
+  DELEGATION_ROUTING_SET_METHOD,
+  delegationRoutingGetParamsSchema,
+  delegationRoutingSetParamsSchema,
   HARNESS_DISPLAY_CAPABILITIES_METHOD,
   HARNESS_DISPLAY_GET_METHOD,
   HARNESS_DISPLAY_SET_METHOD,
@@ -47,6 +51,11 @@ import {
 } from "@codexhost/shared-contracts";
 
 import { handleCredentialImports } from "./credential-imports.js";
+import {
+  applyDelegationRoutingPatch,
+  readDelegationRoutingSnapshot,
+} from "./delegation-routing.js";
+import { DelegationControlError } from "./delegation-types.js";
 import type { DesktopExtensionBackendManager } from "./desktop-extension-backend-manager.js";
 import { handleDesktopExtensionRequest } from "./desktop-extension-requests.js";
 import { errorMessage, rpcEnvelope, rpcError } from "./desktop-rpc.js";
@@ -143,6 +152,44 @@ export class DesktopControlRequests {
           rpcError(
             request,
             error instanceof HarnessPreferenceConflict ? -32091 : -32602,
+            errorMessage(error),
+          ),
+        );
+      }
+      return true;
+    }
+    if (
+      request.method === DELEGATION_ROUTING_GET_METHOD ||
+      request.method === DELEGATION_ROUTING_SET_METHOD
+    ) {
+      const parsed = (
+        request.method === DELEGATION_ROUTING_SET_METHOD
+          ? delegationRoutingSetParamsSchema
+          : delegationRoutingGetParamsSchema
+      ).safeParse(request.params ?? {});
+      if (!parsed.success) {
+        await this.#host.writeJson(
+          rpcError(request, -32602, "Invalid delegation routing settings request"),
+        );
+        return true;
+      }
+      try {
+        const result =
+          request.method === DELEGATION_ROUTING_SET_METHOD
+            ? applyDelegationRoutingPatch(
+                delegationRoutingSetParamsSchema.parse(parsed.data),
+                this.#host.environment,
+              )
+            : readDelegationRoutingSnapshot(
+                delegationRoutingGetParamsSchema.parse(parsed.data),
+                this.#host.environment,
+              );
+        await this.#host.writeJson(rpcEnvelope(request, { result: jsonValueSchema.parse(result) }));
+      } catch (error) {
+        await this.#host.writeJson(
+          rpcError(
+            request,
+            error instanceof DelegationControlError ? -32602 : -32000,
             errorMessage(error),
           ),
         );

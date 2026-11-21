@@ -85,6 +85,20 @@ export interface RendererSettingsMessages {
   readonly idleReleasePending: string;
   readonly idleReleaseUnavailable: string;
   readonly idleReleaseFailed: string;
+  readonly delegationRoutingSection: string;
+  readonly delegationRoutingProfileTitle: string;
+  readonly delegationRoutingProfileDescription: string;
+  readonly delegationRoutingHelpLabel: string;
+  readonly delegationRoutingHelp: readonly string[];
+  readonly delegationRoutingDeepTitle: string;
+  readonly delegationRoutingDeepDescription: string;
+  readonly delegationRoutingLightTitle: string;
+  readonly delegationRoutingLightDescription: string;
+  readonly delegationRoutingReviewTitle: string;
+  readonly delegationRoutingReviewDescription: string;
+  readonly delegationRoutingInvalidSpec: string;
+  readonly delegationRoutingSave: string;
+  readonly delegationRoutingSaved: string;
   readonly reasoningSoftWrapTitle: string;
   readonly reasoningSoftWrapDescription: string;
   readonly pageUnavailable: string;
@@ -361,6 +375,26 @@ const ENGLISH_MESSAGES: RendererSettingsMessages = Object.freeze({
   idleReleasePending: "Syncing…",
   idleReleaseUnavailable: "Not supported by this Host",
   idleReleaseFailed: "Sync failed, try again",
+  delegationRoutingSection: "Delegation routing",
+  delegationRoutingProfileTitle: "Active profile",
+  delegationRoutingProfileDescription:
+    "Default tier mapping used when delegating with --tier deep|light|review.",
+  delegationRoutingHelpLabel: "About delegation routing",
+  delegationRoutingHelp: Object.freeze([
+    "Map deep (complex multi-file), light (bounded mechanical), and review (read-only) tiers to Harness targets using harnessId[:model][@thinking].",
+    "Changes save to your user routing config; a repository's .codexhost/delegation-routing.json can still override them per project.",
+  ]),
+  delegationRoutingDeepTitle: "Deep tier",
+  delegationRoutingDeepDescription: "Complex or multi-file changes (harness[:model][@thinking]).",
+  delegationRoutingLightTitle: "Light tier",
+  delegationRoutingLightDescription:
+    "Simple bounded edits with checks (harness[:model][@thinking]).",
+  delegationRoutingReviewTitle: "Review tier",
+  delegationRoutingReviewDescription: "Read-only audits and reviews (harness[:model][@thinking]).",
+  delegationRoutingInvalidSpec:
+    "Use harnessId[:model][@thinking], e.g. codex or claude-code:opus@high.",
+  delegationRoutingSave: "Save routing",
+  delegationRoutingSaved: "Saved",
   reasoningSoftWrapTitle: "Wrap thinking text",
   reasoningSoftWrapDescription: "Wrap long lines in thinking blocks. Shell output is unaffected.",
   pageUnavailable: "Page unavailable",
@@ -685,6 +719,25 @@ const CHINESE_MESSAGES: RendererSettingsMessages = Object.freeze({
   idleReleasePending: "同步中…",
   idleReleaseUnavailable: "当前 Host 不支持",
   idleReleaseFailed: "同步失败，请重试",
+  delegationRoutingSection: "委派分层路由",
+  delegationRoutingProfileTitle: "当前配置档",
+  delegationRoutingProfileDescription:
+    "使用 --tier deep|light|review 委派任务时采用的默认路由档位。",
+  delegationRoutingHelpLabel: "委派分层路由说明",
+  delegationRoutingHelp: Object.freeze([
+    "将 deep（复杂多文件）、light（小范围机械修改）和 review（只读审查）档位映射到目标 Harness，格式为 harnessId[:model][@thinking]。",
+    "保存后写入用户级路由配置；仓库内 .codexhost/delegation-routing.json 仍可按项目覆盖。",
+  ]),
+  delegationRoutingDeepTitle: "Deep 档位",
+  delegationRoutingDeepDescription: "复杂或多文件任务（harness[:model][@thinking]）。",
+  delegationRoutingLightTitle: "Light 档位",
+  delegationRoutingLightDescription: "范围明确且带校验的轻量任务（harness[:model][@thinking]）。",
+  delegationRoutingReviewTitle: "Review 档位",
+  delegationRoutingReviewDescription: "只读调研与代码审查（harness[:model][@thinking]）。",
+  delegationRoutingInvalidSpec:
+    "格式需为 harnessId[:model][@thinking]，例如 codex 或 claude-code:opus@high。",
+  delegationRoutingSave: "保存路由",
+  delegationRoutingSaved: "已保存",
   reasoningSoftWrapTitle: "换行显示思考文本",
   reasoningSoftWrapDescription: "思考块中的长行自动换行，不影响 Shell 输出。",
   pageUnavailable: "页面不可用",

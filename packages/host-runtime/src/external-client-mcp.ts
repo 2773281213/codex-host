@@ -112,7 +112,16 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        harnessId: string("Harness id from harness_list"),
+        harnessId: string(
+          "Harness id from harness_list (optional when tier is provided; overrides tier route)",
+        ),
+        tier: {
+          type: "string",
+          enum: ["deep", "light", "review"],
+          description:
+            "Optional task tier routed through planner-neutral profiles (deep, light, review)",
+        },
+        profile: string("Explicit routing profile name when using tier"),
         task: string("The full task text"),
         taskName: string("Short display name"),
         cwd: string("Absolute workspace path; required with worktree"),
@@ -130,14 +139,16 @@ const TOOLS: Tool[] = [
         watch: { type: "boolean", description: "Record an event when the Thread stops" },
         watchTimeoutMs: { ...integer("How long to watch; default 29 minutes"), minimum: 1 },
       },
-      required: ["harnessId", "task"],
+      required: ["task"],
     },
     call: (args) => ({
       route: "/v1/delegate/start",
       body: {
-        harnessId: text(args, "harnessId", true),
+        ...(args.harnessId !== undefined ? { harnessId: text(args, "harnessId", true) } : {}),
         task: text(args, "task", true),
         ...pick(args, [
+          "tier",
+          "profile",
           "taskName",
           "cwd",
           "requestId",
@@ -152,6 +163,57 @@ const TOOLS: Tool[] = [
         ...(args.parentThread !== undefined ? { parentThreadId: text(args, "parentThread") } : {}),
       },
     }),
+  },
+  {
+    name: "delegate_routing",
+    description:
+      "Inspect or update planner-neutral tiered routing profiles (deep/light/review -> harnessId[:model][@thinking]).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["show", "set", "unset"] },
+        key: string("Settable key for set/unset (e.g. profile, profiles.thread16.deep)"),
+        value: string("Value for set"),
+        cwd: string("Workspace path used to resolve project .codexhost/delegation-routing.json"),
+        planner: string("Planner Harness ID for show"),
+        profile: string("Explicit profile name for show"),
+        user: {
+          type: "boolean",
+          description:
+            "Write to user-level ~/.codexhost/delegation-routing.json instead of project config",
+        },
+      },
+      required: ["action"],
+    },
+    call: (args) => {
+      const action = text(args, "action", true);
+      if (action === "show") {
+        return {
+          route: "/v1/delegate/routing/show",
+          body: pick(args, ["cwd", "planner", "profile"]),
+        };
+      }
+      if (action === "set") {
+        return {
+          route: "/v1/delegate/routing/set",
+          body: {
+            key: text(args, "key", true),
+            value: text(args, "value", true),
+            ...pick(args, ["cwd", "user"]),
+          },
+        };
+      }
+      if (action === "unset") {
+        return {
+          route: "/v1/delegate/routing/unset",
+          body: {
+            key: text(args, "key", true),
+            ...pick(args, ["cwd", "user"]),
+          },
+        };
+      }
+      throw new DelegationControlError("INVALID_ARGUMENT", "action must be show, set, or unset");
+    },
   },
   {
     name: "thread_read",

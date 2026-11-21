@@ -1,3 +1,4 @@
+import { DELEGATION_TIERS, type DelegationTier } from "@codexhost/shared-contracts";
 import type { JsonValue } from "@codexhost/protocol-core";
 import path from "node:path";
 import { readFile } from "node:fs/promises";
@@ -400,9 +401,80 @@ export async function runDelegationCli(input: {
       );
       return 0;
     }
+    if (group === "delegate" && command === "routing") {
+      const subcommand = parsed.positionals[0] ?? "show";
+      if (subcommand === "show") {
+        rejectUnknown(parsed, ["--cwd", "--planner", "--profile"]);
+        if (parsed.positionals.length > 1) {
+          throw new DelegationControlError(
+            "INVALID_ARGUMENT",
+            "delegate routing show accepts no extra positional arguments",
+          );
+        }
+        writeResult(
+          "delegate routing",
+          await requestRuntime({
+            environment,
+            path: "/v1/delegate/routing/show",
+            body: {
+              ...(cwdOption(parsed) ? { cwd: cwdOption(parsed) } : { cwd: process.cwd() }),
+              ...(value(parsed, "--planner") ? { planner: value(parsed, "--planner") } : {}),
+              ...(value(parsed, "--profile") ? { profile: value(parsed, "--profile") } : {}),
+            },
+            ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+          }),
+        );
+        return 0;
+      }
+      if (subcommand === "set" || subcommand === "unset") {
+        rejectUnknown(parsed, ["--cwd", "--user"]);
+        const key = parsed.positionals[1];
+        const settingValue = parsed.positionals[2];
+        if (
+          subcommand === "set" &&
+          (parsed.positionals.length !== 3 || !key || settingValue === undefined)
+        ) {
+          throw new DelegationControlError(
+            "INVALID_ARGUMENT",
+            "delegate routing set requires <key> <value>",
+          );
+        }
+        if (subcommand === "unset" && (parsed.positionals.length !== 2 || !key)) {
+          throw new DelegationControlError(
+            "INVALID_ARGUMENT",
+            "delegate routing unset requires <key>",
+          );
+        }
+        const userFlag = value(parsed, "--user");
+        if (userFlag !== undefined && userFlag !== "true" && userFlag !== "false") {
+          throw new DelegationControlError("INVALID_ARGUMENT", "--user must be true or false");
+        }
+        writeResult(
+          "delegate routing",
+          await requestRuntime({
+            environment,
+            path: subcommand === "set" ? "/v1/delegate/routing/set" : "/v1/delegate/routing/unset",
+            body: {
+              key,
+              ...(subcommand === "set" ? { value: settingValue } : {}),
+              ...(cwdOption(parsed) ? { cwd: cwdOption(parsed) } : { cwd: process.cwd() }),
+              ...(userFlag !== undefined ? { user: userFlag === "true" } : {}),
+            },
+            ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+          }),
+        );
+        return 0;
+      }
+      throw new DelegationControlError(
+        "INVALID_ARGUMENT",
+        "delegate routing subcommand must be show, set, or unset",
+      );
+    }
     if (group === "delegate" && command === "start") {
       rejectUnknown(parsed, [
         "--harness",
+        "--tier",
+        "--profile",
         "--task",
         "--task-file",
         "--task-name",
@@ -423,11 +495,17 @@ export async function runDelegationCli(input: {
           "delegate start accepts no positional arguments",
         );
       const harnessId = value(parsed, "--harness");
-      const task = await resolveCliTextInput(parsed.options, "--task", input.stdin);
-      if (!harnessId || !task)
+      const tier = value(parsed, "--tier");
+      if (tier !== undefined && !(DELEGATION_TIERS as readonly string[]).includes(tier))
         throw new DelegationControlError(
           "INVALID_ARGUMENT",
-          "--harness and either --task or --task-file are required",
+          "--tier must be deep, light, or review",
+        );
+      const task = await resolveCliTextInput(parsed.options, "--task", input.stdin);
+      if ((!harnessId && !tier) || !task)
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "--harness (or --tier) and either --task or --task-file are required",
         );
       const parentThread = value(parsed, "--parent-thread") ?? callerThreadId(environment);
       const watch = value(parsed, "--watch");
@@ -438,9 +516,12 @@ export async function runDelegationCli(input: {
           "INVALID_ARGUMENT",
           "--watch-timeout-ms requires --watch true",
         );
+      const profile = value(parsed, "--profile");
       // Validate all local options before creating a worktree or making a Runtime request.
       const body = {
-        harnessId,
+        ...(harnessId ? { harnessId } : {}),
+        ...(tier ? { tier: tier as DelegationTier } : {}),
+        ...(profile ? { profile } : {}),
         task,
         ...(value(parsed, "--task-name") !== undefined
           ? { taskName: value(parsed, "--task-name") }

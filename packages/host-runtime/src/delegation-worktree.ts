@@ -14,6 +14,15 @@ export interface DelegationWorktree {
   base: string;
 }
 
+/** Resolves the Git repository top-level directory containing `cwd`, or null if outside Git. */
+export async function resolveGitRepoRoot(cwd: string): Promise<string | null> {
+  try {
+    return await git(cwd, ["rev-parse", "--show-toplevel"]);
+  } catch {
+    return null;
+  }
+}
+
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync(
     "git",

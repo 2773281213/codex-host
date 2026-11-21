@@ -1,9 +1,17 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
+
+import type { RoutedHarnessId } from "@codexhost/protocol-core";
+import { harnessModelRefSchema, harnessThinkingOptionIdSchema } from "@codexhost/shared-contracts";
 
 import {
   DelegationControlError,
   type DelegationControlApi,
   type DelegationControlRegistration,
+  type DelegationGovernanceApi,
+  type DelegationRoutingMutateInput,
+  type DelegationRoutingMutateResult,
+  type DelegationRoutingShowInput,
   type DelegationStartInput,
   type DelegationWatchApi,
   type HarnessInspectInput,
@@ -14,6 +22,14 @@ import {
   type ThreadWaitInput,
   type ThreadWatchInput,
 } from "./delegation-types.js";
+import {
+  loadDelegationRoutingConfig,
+  loadDelegationRoutingLayers,
+  projectDelegationRoutingPath,
+  userDelegationRoutingPath,
+  writeDelegationRoutingSetting,
+} from "./delegation-routing.js";
+import { resolveGitRepoRoot } from "./delegation-worktree.js";
 import {
   isMergedListCursor,
   listSortSeconds,
@@ -43,7 +59,9 @@ function only<T>(values: readonly T[], message: string): T {
   return value;
 }
 
-export class DelegationControlRegistry implements DelegationControlApi, DelegationWatchApi {
+export class DelegationControlRegistry
+  implements DelegationControlApi, DelegationWatchApi, DelegationGovernanceApi
+{
   readonly #registrations = new Set<DelegationControlRegistration>();
   // Changes whenever the session set changes, so a merged list cursor cannot outlive it. The
   // instance id keeps a cursor from matching a rebuilt Registry at the same count.
@@ -56,6 +74,7 @@ export class DelegationControlRegistry implements DelegationControlApi, Delegati
   readonly #remoteRead:
     ((input: ThreadReadInput) => ReturnType<DelegationControlApi["read"]>) | undefined;
   readonly #refs: ThreadRefsStore | undefined;
+  readonly #environment: NodeJS.ProcessEnv;
 
   constructor(
     options: {
@@ -64,10 +83,12 @@ export class DelegationControlRegistry implements DelegationControlApi, Delegati
       watchStore?: DelegationWatchStore;
       refs?: ThreadRefsStore;
       clientEvents?: ClientEventSink;
+      environment?: NodeJS.ProcessEnv;
     } = {},
   ) {
     this.#remoteRead = options.remoteRead;
     this.#refs = options.refs;
+    this.#environment = options.environment ?? process.env;
     this.#watchService = new DelegationWatchService(this, {
       ...(options.diagnose ? { diagnose: options.diagnose } : {}),
       ...(options.watchStore ? { store: options.watchStore } : {}),
@@ -114,9 +135,58 @@ export class DelegationControlRegistry implements DelegationControlApi, Delegati
   }
 
   async start(input: DelegationStartInput) {
-    const { refs: requested, ...start } = input;
+    const { refs: requested, ...rawStart } = input;
     // Validated before anything is created, so a bad reference never leaves a Thread behind.
     const own = normalizeRefs(requested);
+    let start: DelegationStartInput = rawStart;
+    if (rawStart.tier !== undefined || rawStart.profile !== undefined) {
+      const parentCandidate = rawStart.parentThreadId;
+      const plannerHarnessId =
+        parentCandidate && !originClientName(parentCandidate)
+          ? await this.#read({ threadId: parentCandidate, view: "result" })
+              .then((snapshot) => snapshot.harnessId)
+              .catch(() => "unknown")
+          : "unknown";
+      const resolvedRepoRoot = rawStart.cwd
+        ? ((await resolveGitRepoRoot(rawStart.cwd)) ?? undefined)
+        : undefined;
+      const routing = loadDelegationRoutingConfig({
+        ...(resolvedRepoRoot ? { repoRoot: resolvedRepoRoot } : {}),
+        environment: this.#environment,
+        plannerHarnessId,
+        ...(rawStart.profile ? { explicitProfile: rawStart.profile } : {}),
+      });
+      const tierRoute = rawStart.tier ? routing.routes[rawStart.tier] : undefined;
+      const explicitHarness =
+        typeof rawStart.harnessId === "string" && rawStart.harnessId.trim()
+          ? rawStart.harnessId
+          : undefined;
+      const resolvedHarnessId = (explicitHarness ?? tierRoute?.harnessId) as
+        RoutedHarnessId | undefined;
+      if (!resolvedHarnessId) {
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "Either harnessId or tier is required",
+        );
+      }
+      const routeMatchesHarness = tierRoute?.harnessId === resolvedHarnessId;
+      const resolvedModel =
+        rawStart.model ??
+        (routeMatchesHarness && tierRoute?.model
+          ? harnessModelRefSchema.parse({ id: tierRoute.model })
+          : undefined);
+      const resolvedThinking =
+        rawStart.thinkingOptionId ??
+        (routeMatchesHarness && tierRoute?.thinkingOptionId
+          ? harnessThinkingOptionIdSchema.parse(tierRoute.thinkingOptionId)
+          : undefined);
+      start = {
+        ...rawStart,
+        harnessId: resolvedHarnessId,
+        ...(resolvedModel ? { model: resolvedModel } : {}),
+        ...(resolvedThinking ? { thinkingOptionId: resolvedThinking } : {}),
+      };
+    }
     const result = await (await this.#registrationForStart(start)).start(start);
     if (!this.#refs) return result;
     const parent = result.parentThreadId ?? start.parentThreadId;
@@ -210,6 +280,79 @@ export class DelegationControlRegistry implements DelegationControlApi, Delegati
 
   async watches() {
     return this.#watchService.watches();
+  }
+
+  async routingShow(input: DelegationRoutingShowInput = {}) {
+    const repoRoot = input.cwd
+      ? ((await resolveGitRepoRoot(path.resolve(input.cwd))) ?? undefined)
+      : undefined;
+    return loadDelegationRoutingConfig({
+      ...(repoRoot ? { repoRoot } : {}),
+      environment: this.#environment,
+      ...(input.planner ? { plannerHarnessId: input.planner } : {}),
+      ...(input.profile ? { explicitProfile: input.profile } : {}),
+    });
+  }
+
+  async routingSet(input: DelegationRoutingMutateInput): Promise<DelegationRoutingMutateResult> {
+    if (typeof input.key !== "string" || !input.key.trim()) {
+      throw new DelegationControlError("INVALID_ARGUMENT", "Routing key is required");
+    }
+    if (input.value === undefined || input.value === null || String(input.value).trim() === "") {
+      throw new DelegationControlError("INVALID_ARGUMENT", "Routing value is required");
+    }
+    const repoRoot = input.cwd
+      ? ((await resolveGitRepoRoot(path.resolve(input.cwd))) ?? undefined)
+      : undefined;
+    const useUserFile = input.user === true || !repoRoot;
+    const file = useUserFile
+      ? userDelegationRoutingPath(this.#environment)
+      : projectDelegationRoutingPath(repoRoot);
+    const layersBelow = useUserFile
+      ? []
+      : loadDelegationRoutingLayers({ environment: this.#environment }).filter(
+          (layer) => layer.file !== file,
+        );
+    const written = writeDelegationRoutingSetting({
+      file,
+      key: input.key.trim(),
+      value: input.value,
+      layersBelow,
+    });
+    const routing = loadDelegationRoutingConfig({
+      ...(repoRoot ? { repoRoot } : {}),
+      environment: this.#environment,
+    });
+    return { ...written, routing };
+  }
+
+  async routingUnset(input: DelegationRoutingMutateInput): Promise<DelegationRoutingMutateResult> {
+    if (typeof input.key !== "string" || !input.key.trim()) {
+      throw new DelegationControlError("INVALID_ARGUMENT", "Routing key is required");
+    }
+    const repoRoot = input.cwd
+      ? ((await resolveGitRepoRoot(path.resolve(input.cwd))) ?? undefined)
+      : undefined;
+    const useUserFile = input.user === true || !repoRoot;
+    const file = useUserFile
+      ? userDelegationRoutingPath(this.#environment)
+      : projectDelegationRoutingPath(repoRoot);
+    const layersBelow = useUserFile
+      ? []
+      : loadDelegationRoutingLayers({ environment: this.#environment }).filter(
+          (layer) => layer.file !== file,
+        );
+    const written = writeDelegationRoutingSetting({
+      file,
+      key: input.key.trim(),
+      unset: true,
+      layersBelow,
+    });
+    const routing = loadDelegationRoutingConfig({
+      ...(repoRoot ? { repoRoot } : {}),
+      environment: this.#environment,
+    });
+    return { ...written, routing };
   }
 
   /** Stops watching in this process; stored watches resume in the next Runtime. */

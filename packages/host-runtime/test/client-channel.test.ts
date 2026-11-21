@@ -384,6 +384,33 @@ describe("public authenticated owner channel", () => {
     });
     expect(fixture.adapter.sessions).toHaveLength(0);
   });
+  it("reads and persists user delegation routing profiles over the owner client channel", async () => {
+    const dataDirectory = mkdtempSync(path.join(tmpdir(), "client-channel-routing-"));
+    cleanup.push(() => rmSync(dataDirectory, { recursive: true, force: true }));
+    const { a, b } = await setup({ environment: { CODEXHOST_DATA_DIR: dataDirectory } });
+    const initial = await a.request("codexhost/delegation/routing/get", {});
+    expect(initial).toMatchObject({
+      profile: "thread16",
+      routeSpecs: { deep: "codex", light: "deepseek-harness", review: "claude-code" },
+    });
+    const updated = await a.request("codexhost/delegation/routing/set", {
+      user: true,
+      profile: "codex-planner",
+      routes: { deep: "claude-code:opus@high" },
+    });
+    expect(updated).toMatchObject({
+      profile: "codex-planner",
+      routeSpecs: {
+        deep: "claude-code:opus@high",
+        light: "deepseek-harness",
+        review: "codex",
+      },
+    });
+    expect(await b.request("codexhost/delegation/routing/get", {})).toMatchObject({
+      profile: "codex-planner",
+      routeSpecs: { deep: "claude-code:opus@high" },
+    });
+  });
   it("rejects unauthenticated/browser-origin traffic and official Thread execution", async () => {
     const { server, a, fixture } = await setup();
     const url = `http://127.0.0.1:${server.descriptor.port}/v1/rpc`;

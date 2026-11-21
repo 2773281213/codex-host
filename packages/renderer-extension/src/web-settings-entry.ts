@@ -15,6 +15,7 @@ import coloredBrandCss from "./renderer-brand-mark.css";
 import accountsCss from "./settings/accounts.css";
 import delegationCss from "./settings/delegation.css";
 import { RendererSettingsPageScope, type RendererSettingsPageDefinition } from "./settings/core.js";
+import { mountDelegationRoutingControls } from "./settings/delegation-routing-controls.js";
 import { mountIdleReleaseControls } from "./settings/idle-release-controls.js";
 import {
   resolveRendererSettingsLocale,
@@ -55,10 +56,12 @@ function resourcesPage(
     mount(context) {
       const idleRelease = installIdleReleasePreferenceSync(window);
       const disposeControls = mountIdleReleaseControls(context, messages, () => client);
+      const disposeRouting = mountDelegationRoutingControls(context, messages, () => client);
       const preferences = installRendererHarnessPreferenceSync(window);
       preferences.connect("local", client);
       idleRelease.connect(client);
       return () => {
+        disposeRouting();
         disposeControls();
         preferences.dispose();
         idleRelease.dispose();
