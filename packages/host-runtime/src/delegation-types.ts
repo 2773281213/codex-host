@@ -1,4 +1,5 @@
 import type { DelegationTier } from "@codexhost/shared-contracts";
+import type { DelegationIntegrationState } from "./delegation-governance-store.js";
 import type { DelegationRoutingConfig } from "./delegation-routing.js";
 import type { ThreadExportInput, ThreadExportResult } from "./delegation-thread-export.js";
 import type { DelegationWorktree } from "./delegation-worktree.js";
@@ -75,6 +76,17 @@ export interface DelegationPendingQuestion {
   request: JsonObject;
 }
 
+export interface DelegationGovernanceSummary {
+  tier?: DelegationTier;
+  profile?: string;
+  plannerHarnessId?: string;
+  write: boolean;
+  scope: string[];
+  checks: string[];
+  integration: DelegationIntegrationState;
+  warnings?: string[];
+}
+
 export interface DelegationThreadSnapshot {
   hostId?: string;
   threadId: string;
@@ -98,6 +110,8 @@ export interface DelegationThreadSnapshot {
   refs?: string[];
   /** Empty when the Thread has no unanswered questions. */
   pendingQuestions?: DelegationPendingQuestion[];
+  /** Present for Threads started with tier/scope/checks/worktree governance. */
+  governance?: DelegationGovernanceSummary;
 }
 
 export interface DelegationStartInput {
@@ -116,6 +130,20 @@ export interface DelegationStartInput {
   tier?: DelegationTier;
   /** Optional explicit routing profile name when using `tier`. */
   profile?: string;
+  /** Project-relative file or directory paths this delegation may modify. */
+  scope?: string[];
+  /** Shell commands declared for verification inside the workspace/worktree. */
+  checks?: string[];
+  /** Acceptance criteria appended to the governed task instructions. */
+  acceptance?: string;
+  /** When false (default for governed tiers), injects executor anti-recursion role into the child. */
+  allowNestedDelegation?: boolean;
+  /** Caller's CODEXHOST_DELEGATION_ROLE value forwarded by the CLI/listener for recursion checks. */
+  callerRole?: string;
+  /** Resolved Git repository root of the source workspace, used for scope locks. */
+  sourceRepoRoot?: string;
+  /** Worktree metadata created prior to starting the child Thread, persisted in governance. */
+  worktreeMetadata?: DelegationWorktree;
 }
 
 export interface HarnessInspectInput {
@@ -165,6 +193,8 @@ export interface DelegationStartResult {
   watch?: ThreadWatchResult | { state: "notRegistered"; reason: string };
   /** Present when start prepared an isolated Git checkout. */
   worktree?: DelegationWorktree;
+  /** Present when started with governance options (tier/scope/checks/worktree). */
+  governance?: DelegationGovernanceSummary;
   next: { read: string; wait: string };
 }
 
@@ -404,6 +434,10 @@ export type DelegationControlErrorCode =
   | "CURSOR_EXPIRED"
   /** The Question request is unknown, already answered, or no longer pending. */
   | "QUESTION_NOT_PENDING"
+  /** Concurrent write delegations claim overlapping paths in the same repository. */
+  | "SCOPE_CONFLICT"
+  /** A governed executor Thread attempted to recursively delegate further work. */
+  | "EXECUTOR_ROLE_FORBIDDEN"
   | "INTERNAL_ERROR";
 
 export class DelegationControlError extends Error {

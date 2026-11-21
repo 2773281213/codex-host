@@ -134,6 +134,7 @@ export function compactDelegationOutput(
         status: result.status,
         ...(result.cwd ? { cwd: result.cwd } : {}),
         ...(result.worktree ? { worktree: result.worktree } : {}),
+        ...(result.governance ? { governance: result.governance } : {}),
         ...(result.parentThreadId
           ? {
               parent: targetLink(result.parentThreadId),

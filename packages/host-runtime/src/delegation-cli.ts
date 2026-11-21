@@ -1,4 +1,3 @@
-import { DELEGATION_TIERS, type DelegationTier } from "@codexhost/shared-contracts";
 import type { JsonValue } from "@codexhost/protocol-core";
 import path from "node:path";
 import { readFile } from "node:fs/promises";
@@ -12,7 +11,8 @@ import {
 } from "./delegation-cli-options.js";
 import { compactDelegationOutput } from "./delegation-cli-output.js";
 import { resolveCliTextInput } from "./delegation-cli-text-input.js";
-import { startWithDelegationWorktree } from "./delegation-worktree.js";
+import { DELEGATION_ROLE_ENV, isDelegationTier } from "./delegation-policy.js";
+import { resolveGitRepoRoot, startWithDelegationWorktree } from "./delegation-worktree.js";
 import { assertDelegationTextCommand, textDelegationOutput } from "./delegation-cli-text.js";
 import { resolveRuntimeConnection, usesExternalClient } from "./delegation-runtime-connection.js";
 import { runClientCommand } from "./external-client-cli.js";
@@ -475,12 +475,16 @@ export async function runDelegationCli(input: {
         "--harness",
         "--tier",
         "--profile",
+        "--scope",
+        "--check",
+        "--acceptance",
         "--task",
         "--task-file",
         "--task-name",
         "--cwd",
         "--worktree",
         "--base",
+        "--allow-nested-delegation",
         "--model",
         "--thinking",
         "--parent-thread",
@@ -496,7 +500,7 @@ export async function runDelegationCli(input: {
         );
       const harnessId = value(parsed, "--harness");
       const tier = value(parsed, "--tier");
-      if (tier !== undefined && !(DELEGATION_TIERS as readonly string[]).includes(tier))
+      if (tier !== undefined && !isDelegationTier(tier))
         throw new DelegationControlError(
           "INVALID_ARGUMENT",
           "--tier must be deep, light, or review",
@@ -516,12 +520,42 @@ export async function runDelegationCli(input: {
           "INVALID_ARGUMENT",
           "--watch-timeout-ms requires --watch true",
         );
+      const allowNested = value(parsed, "--allow-nested-delegation");
+      if (allowNested !== undefined && allowNested !== "true" && allowNested !== "false")
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "--allow-nested-delegation must be true or false",
+        );
+      const scopes = parsed.repeated.get("--scope");
+      const checks = parsed.repeated.get("--check");
+      const acceptance = value(parsed, "--acceptance");
       const profile = value(parsed, "--profile");
+      const callerRole = environment[DELEGATION_ROLE_ENV];
+      const governedFlags = Boolean(
+        tier ||
+        profile ||
+        scopes?.length ||
+        checks?.length ||
+        acceptance !== undefined ||
+        allowNested !== undefined,
+      );
+      const sourceCwd =
+        cwdOption(parsed) ?? (value(parsed, "--worktree") ? process.cwd() : undefined);
+      const sourceRepoRoot =
+        governedFlags && sourceCwd
+          ? ((await resolveGitRepoRoot(sourceCwd)) ?? undefined)
+          : undefined;
       // Validate all local options before creating a worktree or making a Runtime request.
       const body = {
         ...(harnessId ? { harnessId } : {}),
-        ...(tier ? { tier: tier as DelegationTier } : {}),
+        ...(tier ? { tier } : {}),
         ...(profile ? { profile } : {}),
+        ...(scopes ? { scope: scopes } : {}),
+        ...(checks ? { checks } : {}),
+        ...(acceptance !== undefined ? { acceptance } : {}),
+        ...(allowNested !== undefined ? { allowNestedDelegation: allowNested === "true" } : {}),
+        ...(callerRole ? { callerRole } : {}),
+        ...(sourceRepoRoot ? { sourceRepoRoot } : {}),
         task,
         ...(value(parsed, "--task-name") !== undefined
           ? { taskName: value(parsed, "--task-name") }

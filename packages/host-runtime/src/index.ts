@@ -41,6 +41,29 @@ export { runDelegationCli, DELEGATION_HELP } from "./delegation-cli.js";
 export { DelegationControlRegistry } from "./delegation-control-registry.js";
 export { startDelegationControlServer } from "./delegation-control-server.js";
 export {
+  DelegationGovernanceStore,
+  defaultDelegationGovernanceDirectory,
+} from "./delegation-governance-store.js";
+export type {
+  DelegationGovernanceRecord,
+  DelegationIntegrationState,
+} from "./delegation-governance-store.js";
+export {
+  DELEGATION_EXECUTOR_ROLE,
+  DELEGATION_ROLE_ENV,
+  DELEGATION_TIERS,
+  WRITE_DELEGATION_TIERS,
+  buildGovernedTaskPrompt,
+  checkExecutorRoleGuard,
+  coversScope,
+  holdsWriteScope,
+  normalizeScopePath,
+  outOfScopeFiles,
+  scopesOverlap,
+  validateGovernancePolicy,
+} from "./delegation-policy.js";
+export type { DelegationTier, NormalizedGovernancePlan } from "./delegation-policy.js";
+export {
   DEFAULT_DELEGATION_ROUTING,
   DELEGATION_PROFILE_ENV,
   SETTABLE_ROUTING_KEYS,
