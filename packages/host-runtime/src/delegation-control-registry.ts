@@ -17,9 +17,11 @@ import {
   type DelegationWatchApi,
   type HarnessInspectInput,
   type HarnessListInput,
+  type PromptCacheKeepAliveApi,
   type ThreadAnswerInput,
   type ThreadApplyInput,
   type ThreadDiscardInput,
+  type ThreadKeepAliveInput,
   type ThreadListInput,
   type ThreadReadInput,
   type ThreadVerifyInput,
@@ -125,6 +127,8 @@ export class DelegationControlRegistry
   readonly #refs: ThreadRefsStore | undefined;
   readonly #governance: DelegationGovernanceStore | undefined;
   readonly #environment: NodeJS.ProcessEnv;
+  #keepAliveHandler: PromptCacheKeepAliveApi | undefined;
+  readonly #watchListeners = new Set<() => void>();
 
   constructor(
     options: {
@@ -135,18 +139,59 @@ export class DelegationControlRegistry
       clientEvents?: ClientEventSink;
       governanceStore?: DelegationGovernanceStore;
       environment?: NodeJS.ProcessEnv;
+      keepAlive?: PromptCacheKeepAliveApi;
     } = {},
   ) {
     this.#remoteRead = options.remoteRead;
     this.#refs = options.refs;
     this.#governance = options.governanceStore;
     this.#environment = options.environment ?? process.env;
+    this.#keepAliveHandler = options.keepAlive;
     this.#watchService = new DelegationWatchService(this, {
       ...(options.diagnose ? { diagnose: options.diagnose } : {}),
       ...(options.watchStore ? { store: options.watchStore } : {}),
       ...(options.clientEvents ? { clientEvents: options.clientEvents } : {}),
       verify: (threadId) => this.verifyThread({ threadId }),
+      onWatchesChanged: () => {
+        for (const listener of this.#watchListeners) {
+          try {
+            listener();
+          } catch {
+            /* observer errors never break watch state transitions */
+          }
+        }
+      },
     });
+  }
+
+  /** Attaches the Host's prompt-cache keep-alive controller once the Host starts. */
+  setKeepAliveHandler(handler: PromptCacheKeepAliveApi | undefined): void {
+    this.#keepAliveHandler = handler;
+  }
+
+  onWatchesChanged(listener: () => void): () => void {
+    this.#watchListeners.add(listener);
+    return () => {
+      this.#watchListeners.delete(listener);
+    };
+  }
+
+  activeWatchCountsBySubscriber(): ReadonlyMap<string, number> {
+    return this.#watchService.activeWatchCountsBySubscriber();
+  }
+
+  hasActiveWatchesFor(notifyThreadId: string): boolean {
+    return this.#watchService.hasActiveWatchesFor(notifyThreadId);
+  }
+
+  async keepAlive(input?: ThreadKeepAliveInput) {
+    if (!this.#keepAliveHandler) {
+      throw new DelegationControlError(
+        "UNSUPPORTED",
+        "Prompt-cache keep-alive is unavailable on this Runtime",
+      );
+    }
+    return this.#keepAliveHandler.keepAlive(input);
   }
 
   get size(): number {
@@ -191,20 +236,18 @@ export class DelegationControlRegistry
     const { refs: requested, ...rawStart } = input;
     // Validated before anything is created, so a bad reference never leaves a Thread behind.
     const own = normalizeRefs(requested);
-
-    // Anti-recursion guard: governed executor Threads cannot dispatch further delegations.
-    const callerParentRecord =
-      rawStart.parentThreadId && !originClientName(rawStart.parentThreadId)
-        ? this.#governance?.get(rawStart.parentThreadId)
-        : null;
+    const parentCandidate = rawStart.parentThreadId;
     checkExecutorRoleGuard({
       ...(rawStart.callerRole ? { callerRole: rawStart.callerRole } : {}),
-      ...(callerParentRecord
-        ? { callerIsExecutorThread: !callerParentRecord.allowNestedDelegation }
-        : {}),
+      callerIsExecutorThread: Boolean(
+        parentCandidate &&
+        !originClientName(parentCandidate) &&
+        this.#governance?.isExecutorThread(parentCandidate),
+      ),
     });
 
-    if (!isGovernedStart(rawStart)) {
+    const governed = isGovernedStart(rawStart);
+    if (!governed) {
       const result = await (await this.#registrationForStart(rawStart)).start(rawStart);
       if (!this.#refs) return result;
       const parent = result.parentThreadId ?? rawStart.parentThreadId;
@@ -215,7 +258,6 @@ export class DelegationControlRegistry
     }
 
     const executeGoverned = async () => {
-      const parentCandidate = rawStart.parentThreadId;
       const plannerHarnessId =
         parentCandidate && !originClientName(parentCandidate)
           ? await this.#read({ threadId: parentCandidate, view: "result" })
@@ -369,9 +411,15 @@ export class DelegationControlRegistry
   }
 
   async cancel(input: Parameters<DelegationControlApi["cancel"]>[0]) {
-    return this.#watchService.cancel(input.threadId, async () =>
+    const result = await this.#watchService.cancel(input.threadId, async () =>
       (await this.#registrationForThread(input.threadId)).cancel(input),
     );
+    if (result.cancelled && this.#governance) {
+      this.#governance.update(input.threadId, (draft) => {
+        if (draft.integration === "none") draft.status = "interrupted";
+      });
+    }
+    return result;
   }
 
   async read(input: ThreadReadInput) {

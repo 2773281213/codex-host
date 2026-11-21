@@ -81,6 +81,8 @@ export interface ExternalTurnProjectionHost {
   hasRunningSubagents(parentThreadId: string): boolean;
   publishExternalQueue(threadId: string): Promise<void>;
   startNextQueuedExternalTurn(thread: ExternalThread): Promise<void>;
+  onTurnStarted?(thread: ExternalThread): void;
+  onCompaction?(thread: ExternalThread, trigger: string): void;
 }
 
 /**
@@ -193,7 +195,10 @@ export class ExternalTurnProjection {
       // A successor Turn ends the attribution window of every earlier Turn.
       this.#dropSettledTurnProjections(thread, event.turnId);
       // Not awaited: the write must not delay the Turn's first output.
-      if (!ephemeralTurn) void this.#host.touchThread(thread);
+      if (!ephemeralTurn) {
+        void this.#host.touchThread(thread);
+        this.#host.onTurnStarted?.(thread);
+      }
       await this.#host.setThreadStatus(thread, { type: "active", activeFlags: [] });
     }
     if (event.type === "turn.completed") {
@@ -236,18 +241,18 @@ export class ExternalTurnProjection {
         await this.#host.repository.setDelegationStatus(delegation.delegationId, status);
       }
     }
-    if (
-      event.type === "item.started" &&
-      event.item.type === "contextCompaction" &&
-      this.#host.manualCompactionTurns.get(thread) === event.turnId
-    ) {
-      // Only explicit /compact commands are manual; other commands can auto-compact.
-      // Desktop labels a compaction manual only
-      // through its own client registration, which must precede item/started.
-      await this.#host.writeJson({
-        method: THREAD_MANUAL_COMPACTION_STARTED_METHOD,
-        params: { threadId: thread.id, turnId: event.turnId },
-      });
+    if (event.type === "item.started" && event.item.type === "contextCompaction") {
+      const manual = this.#host.manualCompactionTurns.get(thread) === event.turnId;
+      this.#host.onCompaction?.(thread, manual ? "manual" : "auto");
+      if (manual) {
+        // Only explicit /compact commands are manual; other commands can auto-compact.
+        // Desktop labels a compaction manual only
+        // through its own client registration, which must precede item/started.
+        await this.#host.writeJson({
+          method: THREAD_MANUAL_COMPACTION_STARTED_METHOD,
+          params: { threadId: thread.id, turnId: event.turnId },
+        });
+      }
     }
     if (event.type === "item.completed" && projection.projector.completed) {
       const index = thread.turns.findIndex((turn) => turn.id === event.turnId);

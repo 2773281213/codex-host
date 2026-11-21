@@ -43,6 +43,17 @@ export {
   type IdleReleaseSettings,
 } from "./idle-release.js";
 export {
+  PROMPT_CACHE_KEEPALIVE_INTERVAL_MINUTES_MIN,
+  PROMPT_CACHE_KEEPALIVE_INTERVAL_MINUTES_MAX,
+  PROMPT_CACHE_KEEPALIVE_INTERVAL_MINUTES_DEFAULT,
+  PROMPT_CACHE_KEEPALIVE_CEILING_HOURS_MIN,
+  PROMPT_CACHE_KEEPALIVE_CEILING_HOURS_MAX,
+  PROMPT_CACHE_KEEPALIVE_CEILING_HOURS_DEFAULT,
+  DEFAULT_PROMPT_CACHE_KEEPALIVE_SETTINGS,
+  promptCacheKeepAliveSettingsSchema,
+  type PromptCacheKeepAliveSettings,
+} from "./prompt-cache-keepalive.js";
+export {
   LOADED_SESSIONS_METHOD,
   loadedSessionsSchema,
   type LoadedSession,

@@ -632,6 +632,16 @@ export type HostEvent =
 export type HarnessOutput =
   { kind: "event"; event: HostEvent } | { kind: "interaction"; interaction: HostInteraction };
 
+export interface PromptCacheRefreshResult {
+  refreshedAtUnix: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  /** True when the refresh wrote more cached prefix than it read (cache had already lapsed). */
+  coldCache: boolean;
+}
+
 export interface HarnessSession {
   readonly harnessId: HarnessId;
   readonly capabilities: HarnessSessionCapabilities;
@@ -654,6 +664,11 @@ export interface HarnessSession {
    */
   readCapabilities?(): Promise<HarnessSessionCapabilities>;
   refreshUsage?(): Promise<void>;
+  /**
+   * Refreshes the Session's server-side prompt cache prefix without adding a Turn
+   * to the main transcript. Implementations must not run tools or mutate history.
+   */
+  refreshPromptCache?(): Promise<HarnessResult<PromptCacheRefreshResult>>;
   /** Native background work (e.g. a background command) is still running; the Session must not be released. */
   hasBackgroundWork?(): boolean;
   /** Stops every running detached Item; each still settles through its own events. */

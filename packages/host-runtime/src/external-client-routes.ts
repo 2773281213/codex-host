@@ -8,6 +8,7 @@ import {
   type DelegationControlApi,
   type DelegationGovernanceApi,
   type DelegationWatchApi,
+  type PromptCacheKeepAliveApi,
 } from "./delegation-types.js";
 import type { ClientEventLog } from "./external-client-events.js";
 import { clientOrigin, originClientName } from "./external-client-origin.js";
@@ -150,6 +151,7 @@ export function externalClientRouter(handlers: {
   api: DelegationControlApi;
   watchApi?: DelegationWatchApi;
   governanceApi?: DelegationGovernanceApi;
+  keepAliveApi?: PromptCacheKeepAliveApi;
   events?: ClientEventLog;
   inventory?: HostInventory;
 }): ExternalClientRouter {

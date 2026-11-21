@@ -88,6 +88,22 @@ it("shares GUI file preferences across Web clients and ignores Web-only copies",
     operation: { kind: "idleRelease", value: { enabled: false, timeoutMinutes: 25 } },
   });
   assert.equal((await store.get()).values.idleRelease?.enabled, false);
+  await call("codexhost/preferences/patch", {
+    operation: {
+      kind: "promptCacheKeepAlive",
+      value: { enabled: true, intervalMinutes: 45, ceilingHours: 12 },
+    },
+  });
+  const prefs = (await call("codexhost/preferences/get", {})) as {
+    promptCacheKeepAlive?: { enabled: boolean; intervalMinutes: number; ceilingHours: number };
+    promptCacheKeepAliveAvailable?: boolean;
+  };
+  assert.equal(prefs.promptCacheKeepAliveAvailable, true);
+  assert.deepEqual(prefs.promptCacheKeepAlive, {
+    enabled: true,
+    intervalMinutes: 45,
+    ceilingHours: 12,
+  });
   await a.remember("fake", { model: { id: "alternate" } });
   assert.equal((await a.configuration("fake"))?.model?.id, "alternate");
   await a.remember("fake", { model: { id: "native" }, permissionModeId: "auto" });

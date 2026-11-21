@@ -41,7 +41,7 @@ Specify --harness directly, or --tier deep|light|review to route via the configu
 --task and --task-file are mutually exclusive. --task-file reads UTF-8 from a file, or stdin for -; maximum 262144 bytes (256 KiB) before removing one final LF or CRLF. Other whitespace and special characters are preserved; empty/whitespace-only input is rejected. Terminal stdin is rejected: use a quoted heredoc (<<'EOF') or a pipe. --task is unchanged.
 --task-name supplies a short subtask name (1-120 characters); otherwise the first task line is used.
 The child title is the subtask name only, fixed at creation; parent titles are not appended. Existing Threads are not renamed.
-Omit --model and --thinking to use the Harness native defaults.
+Omit --model and --thinking to use the Harness or tier route defaults.
 --cwd overrides the child workspace; a relative path resolves against the caller process cwd. Otherwise use the resolved parent Thread workspace, then the Host Runtime process cwd.
 --worktree creates a new branch and workspace at <main-repository>.worktrees/<sanitized-branch>, then uses it as the child cwd. The source is --cwd, or the caller process cwd when omitted (not the parent Thread workspace).
 --base requires --worktree and defaults to that source checkout's HEAD commit, including detached HEAD. JSON and compact responses add worktree {path, branch, base}, where base is the resolved commit SHA. Existing branches/directories, merges, rebases, unmerged indexes, non-Git cwd and unresolved bases are rejected. Uncommitted source changes are not copied unless --include-uncommitted true is set.
@@ -51,7 +51,7 @@ Reuse --request-id for an idempotent retry. Identical recent parent/target/task/
 --watch true also registers thread watch on the child with the resolved parent as the notified Thread; the response's watch field reports whether it was registered.
 --ref records where the work came from, such as an issue URL; repeat it for several. Absolute URIs only, at most 16 per Thread; credentials in a URI are removed. A child inherits its parent Thread's references.
 An external client that omits --parent-thread starts the work as itself (parent client:<name>) and must pass --cwd.
-The response confirms cwd and parent. Use its Thread reference with thread read, wait, send, cancel, or watch.`,
+The response confirms cwd and parent. Use its Thread reference with thread read, wait, send, cancel, watch, verify, apply, or discard.`,
   "delegate routing": `codexhost delegate routing show [--cwd <path>] [--planner <harness>] [--profile <name>] [--format json|compact|text]
 codexhost delegate routing set <key> <value> [--cwd <path>] [--user true|false] [--format json|compact|text]
 codexhost delegate routing unset <key> [--cwd <path>] [--user true|false] [--format json|compact|text]
@@ -108,6 +108,8 @@ Dry-run and apply a completed governed worktree Thread's patch unstaged to its s
 Out-of-scope edits require --allow-out-of-scope true after review; failed checks or non-completed status require --force true.`,
   "thread discard": `codexhost thread discard <thread> [--format json|compact|text]
 Discard a finished governed Thread's worktree and branch and release its write-scope lock. Running Threads must be cancelled first.`,
+  "thread keepalive": `codexhost thread keepalive [status|on|off] [--thread <thread>] [--format json|compact|text]
+Inspect or toggle Host-managed 55-minute prompt-cache keep-alive for idle planner Threads waiting on watched delegated children.`,
   "thread list": `codexhost thread list [--cwd <path>] [--parent <thread> | --client <name>] [--ref <uri>] [--limit <n>] [--cursor <cursor>] [--sort created-asc|created-desc|updated-asc|updated-desc|recency-asc|recency-desc] [--format json|compact|text]
 Find existing Threads by workspace, or use --parent to list a Thread's delegated children.
 Workspace listing defaults to the caller process cwd. Default limit 25 (maximum 100), sorted created-desc.
@@ -148,6 +150,7 @@ export const DELEGATION_HELP = `usage:
   codexhost thread verify <thread>
   codexhost thread apply <thread> [--allow-out-of-scope true] [--force true]
   codexhost thread discard <thread>
+  codexhost thread keepalive [status|on|off]
   codexhost thread list
   codexhost client add|list|remove
   codexhost events

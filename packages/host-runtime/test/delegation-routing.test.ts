@@ -191,34 +191,52 @@ describe("tiered planner-neutral delegation routing", () => {
       ).code,
     ).toBe(0);
     expect(
-      (await run(["delegate", "routing", "unset", "profiles.thread16.deep", "--user", "true"]))
-        .code,
-    ).toBe(0);
-    expect(
       (
         await run([
           "delegate",
           "start",
           "--tier",
           "light",
-          "--profile",
-          "thread16",
+          "--scope",
+          "src/a.ts",
+          "--check",
+          "npm test",
           "--task",
           "edit a",
         ])
       ).code,
     ).toBe(0);
+    expect((await run(["thread", "verify", "t1"])).code).toBe(0);
+    expect(
+      (await run(["thread", "apply", "t1", "--allow-out-of-scope", "true", "--force", "true"]))
+        .code,
+    ).toBe(0);
+    expect((await run(["thread", "discard", "t1"])).code).toBe(0);
+    expect((await run(["thread", "keepalive", "off", "--thread", "t1"])).code).toBe(0);
 
     expect(calls.map((c) => c.url)).toEqual([
       "/v1/delegate/routing/show",
       "/v1/delegate/routing/set",
-      "/v1/delegate/routing/unset",
       "/v1/delegate/start",
+      "/v1/thread/verify",
+      "/v1/thread/apply",
+      "/v1/thread/discard",
+      "/v1/thread/keepalive",
     ]);
-    expect(calls[3]?.body).toMatchObject({
+    expect(calls[2]?.body).toMatchObject({
       tier: "light",
-      profile: "thread16",
+      scope: ["src/a.ts"],
+      checks: ["npm test"],
       task: "edit a",
+    });
+    expect(calls[4]?.body).toEqual({
+      threadId: "t1",
+      allowOutOfScope: true,
+      force: true,
+    });
+    expect(calls[6]?.body).toEqual({
+      action: "off",
+      threadId: "t1",
     });
   });
 });

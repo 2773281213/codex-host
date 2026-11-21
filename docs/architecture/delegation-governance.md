@@ -42,3 +42,11 @@
    - 先执行 `git apply --check` 干跑校验（冲突返回 `APPLY_CONFLICT`），通过后以 unstaged 形式落盘到源工作区，先记录 `integration: "applied"` 再清理 worktree 与分支并释放写范围锁。
 4. **丢弃清理**（`codexhost thread discard <thread>` / `POST /v1/thread/discard` / MCP `thread_discard`）：
    - 拒绝仍在运行的 Thread（需先 `thread cancel`）；清理 worktree 与分支，记录 `integration: "discarded"` 并释放写范围锁。
+
+## 4. 等待期原生提示词缓存保活（55 分钟）
+
+- **能力契约**：`@codexhost/harness-adapter` 的 `HarnessSession.refreshPromptCache?()` 定义无污染缓存刷新能力；`@codexhost/adapter-claude-code` 通过 Claude Agent SDK 的 `resume + forkSession: true + persistSession: false + maxTurns: 1`（保留一致的 tools/model/thinking 前缀、在 `canUseTool` 拒绝所有工具调用）实现单次刷新，并在成功后刷新 Composer 的 1 小时 `Prompt cache` 倒计时。
+- **Host 调度器**（`PromptCacheKeepAliveService`）：仅在存在活跃 `thread watch` 时按分钟惰性启动定时器；对空闲且处于观察等待中的规划者 Thread，满足“距上次请求或刷新达到 `intervalMinutes`（默认 55 分钟）且小于 60 分钟 TTL、距最后真实请求未超 `ceilingHours`（默认 8 小时）”时触发刷新。
+- **冷缓存自检**：若刷新写入的 `cacheCreationInputTokens > cacheReadInputTokens`，说明会话处于 5 分钟 TTL 或缓存已失效，自动暂停（`cold-cache`）并输出诊断提示配置 `CLAUDE_CODE_PROMPT_CACHE_TTL=1h`。
+- **空闲释放保护**：`ExternalThreadIdleRelease` 避让所有仍有活跃 watch 的规划者 Thread，防止等待期间被卸载。
+- **查看与开关**：`codexhost thread keepalive [status|on|off] [--thread <id>]`、`POST /v1/thread/keepalive`、MCP `thread_keepalive`；偏好配置持久化在 `harness-preferences-v1.json` 的 `promptCacheKeepAlive` 字段，并在 Desktop 外观/资源设置页及 Web 资源设置页提供可视化开关、刷新间隔与最长窗口配置。

@@ -79,6 +79,18 @@ export interface RendererSettingsMessages {
   readonly idleReleasePending: string;
   readonly idleReleaseUnavailable: string;
   readonly idleReleaseFailed: string;
+  readonly promptCacheKeepAliveSection: string;
+  readonly promptCacheKeepAliveTitle: string;
+  readonly promptCacheKeepAliveDescription: string;
+  readonly promptCacheKeepAliveHelpLabel: string;
+  readonly promptCacheKeepAliveHelp: readonly string[];
+  readonly promptCacheKeepAliveIntervalTitle: string;
+  readonly promptCacheKeepAliveIntervalDescription: string;
+  readonly promptCacheKeepAliveIntervalInvalid: string;
+  readonly promptCacheKeepAliveCeilingTitle: string;
+  readonly promptCacheKeepAliveCeilingDescription: string;
+  readonly promptCacheKeepAliveCeilingInvalid: string;
+  readonly promptCacheKeepAliveHours: string;
   readonly delegationRoutingSection: string;
   readonly delegationRoutingProfileTitle: string;
   readonly delegationRoutingProfileDescription: string;
@@ -366,6 +378,22 @@ const ENGLISH_MESSAGES: RendererSettingsMessages = Object.freeze({
   idleReleasePending: "Syncing…",
   idleReleaseUnavailable: "Not supported by this Host",
   idleReleaseFailed: "Sync failed, try again",
+  promptCacheKeepAliveSection: "Prompt cache keep-alive",
+  promptCacheKeepAliveTitle: "Refresh Claude prompt cache while waiting",
+  promptCacheKeepAliveDescription:
+    "Send a non-persisted forked refresh before the 1-hour cache TTL lapses while delegated watches are active.",
+  promptCacheKeepAliveHelpLabel: "About prompt cache keep-alive",
+  promptCacheKeepAliveHelp: Object.freeze([
+    "Only idle Claude Code Threads with active watched children are refreshed, using a lightweight forked request that does not add transcript turns.",
+    "If a refresh detects a cold cache (more tokens written than read), keep-alive pauses automatically for that Thread until resumed.",
+  ]),
+  promptCacheKeepAliveIntervalTitle: "Refresh interval",
+  promptCacheKeepAliveIntervalDescription: "1–59 minutes (recommended: 55).",
+  promptCacheKeepAliveIntervalInvalid: "Enter a whole number from 1 to 59.",
+  promptCacheKeepAliveCeilingTitle: "Maximum refresh window",
+  promptCacheKeepAliveCeilingDescription: "1–48 hours after the last real user turn.",
+  promptCacheKeepAliveCeilingInvalid: "Enter a whole number from 1 to 48.",
+  promptCacheKeepAliveHours: "h",
   delegationRoutingSection: "Delegation routing",
   delegationRoutingProfileTitle: "Active profile",
   delegationRoutingProfileDescription:
@@ -704,6 +732,22 @@ const CHINESE_MESSAGES: RendererSettingsMessages = Object.freeze({
   idleReleasePending: "同步中…",
   idleReleaseUnavailable: "当前 Host 不支持",
   idleReleaseFailed: "同步失败，请重试",
+  promptCacheKeepAliveSection: "提示词缓存保活",
+  promptCacheKeepAliveTitle: "等待子任务时保活 Claude 提示词缓存",
+  promptCacheKeepAliveDescription:
+    "在委派 watch 活跃且规划会话空闲时，于 1 小时缓存过期前发起不落盘的轻量 fork 刷新。",
+  promptCacheKeepAliveHelpLabel: "提示词缓存保活说明",
+  promptCacheKeepAliveHelp: Object.freeze([
+    "仅对存在活跃 watch 子任务的空闲 Claude Code 会话生效，不向主对话写入消息轮次，且会避免释放该会话。",
+    "若刷新时检测到冷缓存（写入 token 大于读取 token），会自动暂停该会话的保活，避免无效计费。",
+  ]),
+  promptCacheKeepAliveIntervalTitle: "刷新间隔",
+  promptCacheKeepAliveIntervalDescription: "1～59 分钟（建议 55 分钟）。",
+  promptCacheKeepAliveIntervalInvalid: "请输入 1～59 之间的整数。",
+  promptCacheKeepAliveCeilingTitle: "最长保活窗口",
+  promptCacheKeepAliveCeilingDescription: "自上次真实对话起 1～48 小时内。",
+  promptCacheKeepAliveCeilingInvalid: "请输入 1～48 之间的整数。",
+  promptCacheKeepAliveHours: "小时",
   delegationRoutingSection: "委派分层路由",
   delegationRoutingProfileTitle: "当前配置档",
   delegationRoutingProfileDescription:

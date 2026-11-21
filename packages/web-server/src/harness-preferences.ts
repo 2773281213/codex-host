@@ -1,6 +1,7 @@
 /** Web preferences use the shared owner RPC. */
 import {
   DEFAULT_IDLE_RELEASE_SETTINGS,
+  DEFAULT_PROMPT_CACHE_KEEPALIVE_SETTINGS,
   HARNESS_PREFERENCES_GET_METHOD,
   HARNESS_PREFERENCES_PATCH_METHOD,
   harnessPreferenceSnapshotSchema,
@@ -160,6 +161,9 @@ export class WebHarnessPreferences {
       return {
         idleRelease: external.values.idleRelease ?? DEFAULT_IDLE_RELEASE_SETTINGS,
         idleReleaseAvailable: true,
+        promptCacheKeepAlive:
+          external.values.promptCacheKeepAlive ?? DEFAULT_PROMPT_CACHE_KEEPALIVE_SETTINGS,
+        promptCacheKeepAliveAvailable: true,
         revision: external.revision,
       };
     });

@@ -52,7 +52,6 @@ export {
   DELEGATION_EXECUTOR_ROLE,
   DELEGATION_ROLE_ENV,
   DELEGATION_TIERS,
-  WRITE_DELEGATION_TIERS,
   buildGovernedTaskPrompt,
   checkExecutorRoleGuard,
   coversScope,
@@ -105,6 +104,19 @@ export type {
   ThreadDiscardResult,
   ThreadVerifyResult,
 } from "./delegation-worktree-lifecycle.js";
+export {
+  PROMPT_CACHE_CHECK_INTERVAL_MS,
+  PROMPT_CACHE_RETRY_BACKOFF_MS,
+  PROMPT_CACHE_TTL_MS,
+  PromptCacheKeepAliveService,
+  decidePromptCacheKeepAlive,
+} from "./prompt-cache-keepalive.js";
+export type {
+  PromptCacheKeepAliveDecision,
+  PromptCacheKeepAliveDecisionInput,
+  PromptCacheKeepAliveStatus,
+  PromptCacheKeepAliveThreadState,
+} from "./prompt-cache-keepalive.js";
 export { installDelegationSkills, CODEXHOST_DELEGATION_SKILL } from "./delegation-skill.js";
 export {
   DELEGATION_CLI_PATH_ENV,

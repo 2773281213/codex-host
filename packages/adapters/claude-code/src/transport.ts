@@ -233,6 +233,13 @@ export interface ClaudeTransportContextUsage {
   model: string;
 }
 
+export interface ClaudePromptCacheRefreshUsage {
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
 export interface ClaudePlanLimitWindow {
   utilizationPercent: number;
   resetsAtUnix?: number;
@@ -294,6 +301,11 @@ export interface ClaudeTurnTransport {
   stopTasks(taskIds: readonly string[]): Promise<void>;
   start(): Promise<void>;
   getContextUsage(detail?: "summary" | "full"): Promise<ClaudeTransportContextUsage | null>;
+  /**
+   * Ephemeral non-persisted fork over the live session prefix to refresh prompt cache without
+   * mutating the transcript or running tools.
+   */
+  refreshPromptCache?(): Promise<ClaudePromptCacheRefreshUsage>;
   /** Live slash commands of the started native Session, when known. */
   slashCommands?(): ClaudeSlashCommandSnapshot | null;
   /**

@@ -125,6 +125,7 @@ export function compactDelegationOutput(
     case "thread verify":
     case "thread apply":
     case "thread discard":
+    case "thread keepalive":
       return body;
     case "harness inspect":
       return inspectOutput(body as HarnessInspectResult);

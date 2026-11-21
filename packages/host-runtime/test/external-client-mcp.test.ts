@@ -134,6 +134,7 @@ describe("external client MCP endpoint", () => {
       "thread_verify",
       "thread_apply",
       "thread_discard",
+      "thread_keepalive",
       "events_poll",
     ]);
     expect(tools.find((tool) => tool.name === "thread_send")).toMatchObject({
