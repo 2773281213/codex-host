@@ -76,21 +76,37 @@ export function createStreamRedactor(values: readonly string[] = []): {
   if (secrets.length === 0) {
     return { push: (chunk) => decoder.write(chunk), end: () => decoder.end() };
   }
-  const scrub = (text: string) =>
-    secrets.reduce((accumulator, secret) => accumulator.split(secret).join(CHECK_REDACTED), text);
-  const hold = (secrets[0]?.length ?? 1) - 1;
+  const maxSecretLen = secrets[0]?.length ?? 1;
   let carry = "";
+  const drain = (buffer: string, finalize: boolean): string => {
+    let output = "";
+    let index = 0;
+    while (index < buffer.length) {
+      if (!finalize && buffer.length - index < maxSecretLen) break;
+      let matchedLength = 0;
+      for (const secret of secrets) {
+        if (buffer.startsWith(secret, index)) {
+          matchedLength = secret.length;
+          break;
+        }
+      }
+      if (matchedLength > 0) {
+        output += CHECK_REDACTED;
+        index += matchedLength;
+      } else {
+        output += buffer[index];
+        index += 1;
+      }
+    }
+    carry = finalize ? "" : buffer.slice(index);
+    return output;
+  };
   return {
     push(chunk) {
-      const text = scrub(carry + decoder.write(chunk));
-      const cut = Math.max(0, text.length - hold);
-      carry = text.slice(cut);
-      return text.slice(0, cut);
+      return drain(carry + decoder.write(chunk), false);
     },
     end() {
-      const rest = scrub(carry + decoder.end());
-      carry = "";
-      return rest;
+      return drain(carry + decoder.end(), true);
     },
   };
 }
@@ -153,10 +169,16 @@ function runShellCheckCommand(input: {
   const platform = input.platform ?? process.platform;
   return new Promise((resolve) => {
     const started = Date.now();
-    const log = input.logFile ? fs.createWriteStream(input.logFile, { flags: "a" }) : null;
+    const log = input.logFile
+      ? fs.createWriteStream(input.logFile, { flags: "w", mode: 0o600 })
+      : null;
+    let logFailed = false;
+    log?.on("error", () => {
+      logFailed = true;
+    });
     let logged = 0;
     const writeLog = (text: string) => {
-      if (!log || !text || logged >= MAX_LOG_CHARS) return;
+      if (!log || logFailed || !text || logged >= MAX_LOG_CHARS) return;
       logged += text.length;
       log.write(text);
       if (logged >= MAX_LOG_CHARS) log.write("\n[codexhost: check log truncated]\n");
@@ -190,7 +212,10 @@ function runShellCheckCommand(input: {
       input.signal?.removeEventListener("abort", onAbort);
       take(stdout, outRedactor.end());
       take(stderr, errRedactor.end());
-      const done = () =>
+      let resolved = false;
+      const done = () => {
+        if (resolved) return;
+        resolved = true;
         resolve({
           ...outcome,
           timedOut,
@@ -199,8 +224,13 @@ function runShellCheckCommand(input: {
           stdout: stdout.text(),
           stderr: stderr.text(),
         });
-      if (log) log.end(done);
-      else done();
+      };
+      if (log && !logFailed && !log.destroyed && !log.errored) {
+        log.once("error", done);
+        log.end(done);
+      } else {
+        done();
+      }
     };
 
     const stop = () => {
@@ -311,7 +341,7 @@ export async function runDelegationChecks(
   },
 ): Promise<DelegationCheckResult[]> {
   if (commands.length === 0) return [];
-  if (options.logDir) fs.mkdirSync(options.logDir, { recursive: true });
+  if (options.logDir) fs.mkdirSync(options.logDir, { recursive: true, mode: 0o700 });
   const results: DelegationCheckResult[] = [];
   for (const [index, command] of commands.entries()) {
     if (options.signal?.aborted) {

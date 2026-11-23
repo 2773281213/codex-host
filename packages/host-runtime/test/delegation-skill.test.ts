@@ -4,7 +4,11 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { CODEXHOST_DELEGATION_SKILL, installDelegationSkills } from "../src/delegation-skill.js";
+import {
+  CODEXHOST_DELEGATION_SKILL,
+  installDelegationSkills,
+  SKILL_VERSION,
+} from "../src/delegation-skill.js";
 
 async function home(): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), "codexhost-skill-test-"));
@@ -65,6 +69,8 @@ describe("delegation Skill installation", () => {
     ["v8 Skill that ran codexhost from PATH", "codexhost-delegation-v8.md"],
     ["v9 Skill without child-session name guidance", "codexhost-delegation-v9.md"],
     ["v10 Skill without external-client credentials", "codexhost-delegation-v10.md"],
+    ["fork v16 Skill before keep-alive became opt-in", "codexhost-delegation-v16-branch.md"],
+    ["upstream v16 Skill before keep-alive became opt-in", "codexhost-delegation-v16-upstream.md"],
   ])("updates the %s", async (_name, fixture) => {
     const root = await home();
     const shipped = await readFile(new URL(`./fixtures/${fixture}`, import.meta.url), "utf8");
@@ -116,10 +122,12 @@ describe("delegation Skill installation", () => {
   });
 
   it("routes natural agent requests and points execution to the authoritative help", () => {
-    expect(CODEXHOST_DELEGATION_SKILL).toContain("version: 16");
+    expect(CODEXHOST_DELEGATION_SKILL).toContain(`version: ${SKILL_VERSION}`);
     expect(CODEXHOST_DELEGATION_SKILL).toContain("--tier deep|light|review");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("thread verify <thread>");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("thread keepalive");
+    expect(CODEXHOST_DELEGATION_SKILL).toContain("off by default");
+    expect(CODEXHOST_DELEGATION_SKILL).toContain("must be enabled in Settings");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("@agent) to independently perform a task");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("session's content, progress, or results");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("Not for recapping the current conversation");

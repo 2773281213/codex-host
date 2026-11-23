@@ -24,6 +24,8 @@ export interface DelegationGovernanceRecord extends ScopeHoldingRecord {
   scope: string[];
   checks: string[];
   acceptance?: string;
+  /** Working directory of the delegated Thread (fallback when running outside Git). */
+  cwd?: string;
   sourceRepoRoot?: string;
   worktree?: DelegationWorktree;
   status: DelegationThreadStatus | "verifying";
@@ -38,6 +40,8 @@ export interface DelegationGovernanceRecord extends ScopeHoldingRecord {
   createdAt: string;
   updatedAt: string;
   verifiedAt?: string;
+  /** Turn id observed when `verifiedAt` was recorded; a later Turn invalidates cached verification. */
+  verifiedTurnId?: string;
   appliedAt?: string;
   discardedAt?: string;
 }
@@ -60,6 +64,7 @@ function recordKey(threadId: string): string {
 export class DelegationGovernanceStore {
   readonly #directory: string;
   #tail: Promise<unknown> = Promise.resolve();
+  readonly #threadTails = new Map<string, Promise<unknown>>();
 
   constructor(directory: string) {
     this.#directory = directory;
@@ -78,10 +83,27 @@ export class DelegationGovernanceStore {
     };
   }
 
-  /** Serializes critical sections such as scope-conflict checks + creation. */
+  /**
+   * Serializes short store-wide critical sections: scope-conflict checks with the claim, and
+   * writing a patch into a source checkout. Never hold it across checks or other long work.
+   */
   withLock<T>(operation: () => Promise<T>): Promise<T> {
     const run = this.#tail.then(operation);
     this.#tail = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * Serializes verify, apply and discard of one Thread, so two of them never share its worktree
+   * at once, while other Threads and new delegations proceed.
+   */
+  withThreadLock<T>(threadId: string, operation: () => Promise<T>): Promise<T> {
+    const run = (this.#threadTails.get(threadId) ?? Promise.resolve()).then(operation);
+    const tail = run.catch(() => undefined);
+    this.#threadTails.set(threadId, tail);
+    void tail.then(() => {
+      if (this.#threadTails.get(threadId) === tail) this.#threadTails.delete(threadId);
+    });
     return run;
   }
 
@@ -168,6 +190,11 @@ export class DelegationGovernanceStore {
       fs.rmSync(temporary, { force: true });
     }
     return target;
+  }
+
+  /** Removes a stored patch file when a Thread resumes work and invalidates prior verification. */
+  clearPatch(threadId: string): void {
+    fs.rmSync(this.paths(threadId).patchFile, { force: true });
   }
 
   /** Whether a Thread was created as a governed executor that may not recursively delegate. */

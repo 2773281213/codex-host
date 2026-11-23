@@ -11,8 +11,13 @@ import {
 } from "./delegation-cli-options.js";
 import { compactDelegationOutput } from "./delegation-cli-output.js";
 import { resolveCliTextInput } from "./delegation-cli-text-input.js";
-import { DELEGATION_ROLE_ENV, isDelegationTier } from "./delegation-policy.js";
-import { resolveGitRepoRoot, startWithDelegationWorktree } from "./delegation-worktree.js";
+import {
+  checkExecutorRoleGuard,
+  DELEGATION_ROLE_ENV,
+  isDelegationTier,
+  requestsGovernance,
+} from "./delegation-policy.js";
+import { startWithDelegationWorktree } from "./delegation-worktree.js";
 import { assertDelegationTextCommand, textDelegationOutput } from "./delegation-cli-text.js";
 import { resolveRuntimeConnection, usesExternalClient } from "./delegation-runtime-connection.js";
 import { runClientCommand } from "./external-client-cli.js";
@@ -507,6 +512,12 @@ export async function runDelegationCli(input: {
           "INVALID_ARGUMENT",
           "--tier must be deep, light, or review",
         );
+      const profile = value(parsed, "--profile");
+      if (profile !== undefined && !profile.trim())
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "--profile must be a non-empty string",
+        );
       const task = await resolveCliTextInput(parsed.options, "--task", input.stdin);
       if ((!harnessId && !tier) || !task)
         throw new DelegationControlError(
@@ -549,23 +560,27 @@ export async function runDelegationCli(input: {
       const scopes = parsed.repeated.get("--scope");
       const checks = parsed.repeated.get("--check");
       const acceptance = value(parsed, "--acceptance");
-      const profile = value(parsed, "--profile");
       const callerRole = environment[DELEGATION_ROLE_ENV];
-      const governedFlags = Boolean(
-        tier ||
-        profile ||
-        scopes?.length ||
-        checks?.length ||
-        acceptance !== undefined ||
-        includeUncommitted === "true" ||
-        allowNested !== undefined,
-      );
-      const sourceCwd =
-        cwdOption(parsed) ?? (value(parsed, "--worktree") ? process.cwd() : undefined);
-      const sourceRepoRoot =
-        governedFlags && sourceCwd
-          ? ((await resolveGitRepoRoot(sourceCwd)) ?? undefined)
-          : undefined;
+      const governedFlags = requestsGovernance({
+        tier,
+        profile,
+        scope: scopes,
+        checks,
+        acceptance,
+        allowNestedDelegation: allowNested === undefined ? undefined : allowNested === "true",
+      });
+      if (!governedFlags && autoVerify === "true") {
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "--auto-verify requires a governed delegation (--tier, --scope or --check)",
+        );
+      }
+      const worktreeBranch = value(parsed, "--worktree");
+      const base = value(parsed, "--base");
+      const sourceCwd = cwdOption(parsed) ?? (worktreeBranch ? process.cwd() : undefined);
+      // An executor never creates a local checkout or asks the Host for one.
+      if (worktreeBranch !== undefined)
+        checkExecutorRoleGuard({ ...(callerRole ? { callerRole } : {}) });
       // Validate all local options before creating a worktree or making a Runtime request.
       const body = {
         ...(harnessId ? { harnessId } : {}),
@@ -576,7 +591,6 @@ export async function runDelegationCli(input: {
         ...(acceptance !== undefined ? { acceptance } : {}),
         ...(allowNested !== undefined ? { allowNestedDelegation: allowNested === "true" } : {}),
         ...(callerRole ? { callerRole } : {}),
-        ...(sourceRepoRoot ? { sourceRepoRoot } : {}),
         task,
         ...(value(parsed, "--task-name") !== undefined
           ? { taskName: value(parsed, "--task-name") }
@@ -596,28 +610,37 @@ export async function runDelegationCli(input: {
             }
           : {}),
       };
-      writeResult(
-        "delegate start",
-        await startWithDelegationWorktree(
-          {
-            cwd: sourceCwd,
-            branch: value(parsed, "--worktree"),
-            base: value(parsed, "--base"),
-            includeUncommitted: includeUncommitted === "true",
-          },
-          (cwd, createdWorktree) =>
-            requestRuntime({
+      // Governed worktrees are created by the Host; only plain worktrees are prepared locally.
+      const result =
+        governedFlags && worktreeBranch !== undefined
+          ? await requestRuntime({
               environment,
               path: "/v1/delegate/start",
               body: {
                 ...body,
-                ...(cwd ? { cwd } : {}),
-                ...(governedFlags && createdWorktree ? { worktreeMetadata: createdWorktree } : {}),
+                cwd: sourceCwd,
+                worktree: worktreeBranch,
+                ...(base !== undefined ? { base } : {}),
+                ...(includeUncommitted === "true" ? { includeUncommitted: true } : {}),
               },
               ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-            }),
-        ),
-      );
+            })
+          : await startWithDelegationWorktree(
+              {
+                cwd: sourceCwd,
+                branch: worktreeBranch,
+                base,
+                includeUncommitted: includeUncommitted === "true",
+              },
+              (cwd) =>
+                requestRuntime({
+                  environment,
+                  path: "/v1/delegate/start",
+                  body: { ...body, ...(cwd ? { cwd } : {}) },
+                  ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+                }),
+            );
+      writeResult("delegate start", result);
       return 0;
     }
     if (group === "thread" && command === "send") {

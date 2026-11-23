@@ -46,6 +46,8 @@ interface Watch extends PersistedWatch {
   deliverGraceUntil?: number;
   /** Restored while watching: the Turn that was running may have been cut off by the restart. */
   crossedRestart?: boolean;
+  /** Transient in-process guard while `autoVerify` runs asynchronously off the poll loop. */
+  verifying?: boolean;
 }
 
 function persisted(watch: Watch): PersistedWatch {
@@ -103,7 +105,7 @@ function errorCode(error: unknown): string | undefined {
 
 /**
  * A failed send is retried only when the call chain proves no Turn started.
- * - permanent: the notified Thread is missing or read-only; retrying cannot help.
+ * - permanent: the notified Thread is missing, read-only, or already integrated; retrying cannot help.
  * - rejected: THREAD_BUSY is decided before any start, and `notStarted` marks a
  *   start the target explicitly refused, so a retry cannot duplicate it.
  * - unknown: anything else. A structured error is not proof: an adapter may
@@ -112,7 +114,12 @@ function errorCode(error: unknown): string | undefined {
  */
 function deliveryFailure(error: unknown): "permanent" | "rejected" | "unknown" {
   if (!(error instanceof DelegationControlError)) return "unknown";
-  if (error.code === "THREAD_NOT_FOUND" || error.details?.readOnly === true) return "permanent";
+  if (
+    error.code === "THREAD_NOT_FOUND" ||
+    error.code === "ALREADY_INTEGRATED" ||
+    error.details?.readOnly === true
+  )
+    return "permanent";
   if (error.code === "THREAD_BUSY" || error.details?.notStarted === true) return "rejected";
   return "unknown";
 }
@@ -282,7 +289,13 @@ export class DelegationWatchService {
         watch.threadId === input.threadId &&
         watch.notifyThreadId === input.notifyThreadId,
     );
-    if (existing) return { ...result, state: "watching", timeoutMs: existing.timeoutMs };
+    if (existing) {
+      if (input.autoVerify === true && !existing.autoVerify) {
+        existing.autoVerify = true;
+        await this.#persist(existing, true);
+      }
+      return { ...result, state: "watching", timeoutMs: existing.timeoutMs };
+    }
     if (this.#closed) throw new DelegationControlError("INTERNAL_ERROR", "Host Runtime is closing");
     const watch: Watch = {
       id: randomUUID(),
@@ -506,7 +519,12 @@ export class DelegationWatchService {
   async #tick(): Promise<void> {
     for (const watch of [...this.#watches]) {
       if (this.#closed) return;
-      if (watch.state !== "watching" || this.#cancelling.has(watch.threadId)) continue;
+      if (
+        watch.state !== "watching" ||
+        watch.verifying === true ||
+        this.#cancelling.has(watch.threadId)
+      )
+        continue;
       const generation = watch.observationGeneration;
       const observed = await this.#observe(watch);
       if (
@@ -519,19 +537,16 @@ export class DelegationWatchService {
       const { outcome, turnId, restartNote, interactionId } = observed;
       if (restartNote) watch.restartNote = restartNote;
       if (outcome === "completed" && watch.autoVerify === true && this.#verify) {
-        try {
-          const verified = await this.#verify(watch.threadId);
-          watch.verifyNote = formatAutoVerifyNote(verified);
-        } catch (error) {
-          watch.verifyNote = `Auto-verify could not run: ${error instanceof Error ? error.message : String(error)}`;
-        }
-        if (
-          this.#closed ||
-          !this.#watches.includes(watch) ||
-          this.#cancelling.has(watch.threadId) ||
-          generation !== watch.observationGeneration
-        )
-          continue;
+        // Run auto-verify off the poll loop so slow checks never delay other watches.
+        watch.verifying = true;
+        void this.#runAutoVerify(watch, this.#verify, {
+          outcome,
+          ...(turnId ? { turnId } : {}),
+          ...(restartNote ? { restartNote } : {}),
+          ...(interactionId ? { interactionId } : {}),
+          generation,
+        });
+        continue;
       }
       watch.state = "pendingDelivery";
       watch.outcome = outcome;
@@ -549,6 +564,52 @@ export class DelegationWatchService {
     for (const notifyThreadId of subscribers) {
       if (this.#closed) return;
       await this.#deliver(notifyThreadId);
+    }
+  }
+
+  async #runAutoVerify(
+    watch: Watch,
+    verify: (threadId: string) => Promise<ThreadVerifyResult>,
+    observed: {
+      outcome: ThreadWatchOutcome;
+      turnId?: string;
+      restartNote?: string;
+      interactionId?: string;
+      generation: number | undefined;
+    },
+  ): Promise<void> {
+    try {
+      let verifyNote: string;
+      try {
+        const verified = await verify(watch.threadId);
+        verifyNote = formatAutoVerifyNote(verified);
+      } catch (error) {
+        verifyNote = `Auto-verify could not run: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      if (
+        this.#closed ||
+        !this.#watches.includes(watch) ||
+        this.#cancelling.has(watch.threadId) ||
+        observed.generation !== watch.observationGeneration
+      ) {
+        return;
+      }
+      watch.verifyNote = verifyNote;
+      if (observed.restartNote) watch.restartNote = observed.restartNote;
+      watch.state = "pendingDelivery";
+      watch.outcome = observed.outcome;
+      if (observed.turnId) watch.turnId = observed.turnId;
+      if (observed.interactionId) watch.interactionId = observed.interactionId;
+      watch.deliveryDeadline = Date.now() + DELIVERY_WINDOW_MS;
+      await this.#persist(watch);
+      this.#notifyWatchesChanged();
+    } catch (error) {
+      this.#diagnose(error);
+    } finally {
+      delete watch.verifying;
+      if (!this.#closed && this.#watches.includes(watch)) {
+        this.nudge(watch.threadId);
+      }
     }
   }
 
@@ -679,8 +740,8 @@ export class DelegationWatchService {
             : {}),
           ...(watch.harnessId ? { harnessId: watch.harnessId } : {}),
           ...(watch.refs?.length ? { refs: watch.refs } : {}),
-          ...((watch.verifyNote ?? watch.restartNote)
-            ? { note: watch.verifyNote ?? watch.restartNote }
+          ...((watch.outcome === "completed" ? watch.verifyNote : watch.restartNote)
+            ? { note: watch.outcome === "completed" ? watch.verifyNote : watch.restartNote }
             : {}),
         })),
       );

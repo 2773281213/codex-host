@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
-import { rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -18,18 +19,69 @@ import type {
 import { outOfScopeFiles } from "./delegation-policy.js";
 import { loadDelegationRoutingConfig } from "./delegation-routing.js";
 import {
+  DELEGATION_RUNTIME_ENDPOINT_ENV,
+  DELEGATION_RUNTIME_TOKEN_ENV,
   DelegationControlError,
+  EXTERNAL_CLIENT_TOKEN_ENV,
+  EXTERNAL_CLIENT_TOKEN_FILE_ENV,
   type DelegationControlApi,
   type DelegationThreadStatus,
 } from "./delegation-types.js";
+import {
+  isCommitOid,
+  isSymbolicLink,
+  managedWorktreeParent,
+  managedWorktreePath,
+  parseWorktreeList,
+  resolveComparablePath,
+  samePath,
+} from "./delegation-worktree.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_PATCH_BUFFER = 64 * 1024 * 1024;
+const CHECK_STRIPPED_ENV_KEYS = new Set([
+  DELEGATION_RUNTIME_ENDPOINT_ENV.toUpperCase(),
+  DELEGATION_RUNTIME_TOKEN_ENV.toUpperCase(),
+  EXTERNAL_CLIENT_TOKEN_ENV.toUpperCase(),
+  EXTERNAL_CLIENT_TOKEN_FILE_ENV.toUpperCase(),
+]);
+const SENSITIVE_ENV_KEY =
+  /(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|AUTH|COOKIE|PRIVATE_KEY|CREDENTIAL)/iu;
+
+function buildCheckEnvironment(baseEnv: NodeJS.ProcessEnv): {
+  env: NodeJS.ProcessEnv;
+  redact: string[];
+} {
+  const env: NodeJS.ProcessEnv = {};
+  const redact: string[] = [];
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (value === undefined) continue;
+    const stripped = CHECK_STRIPPED_ENV_KEYS.has(key.toUpperCase());
+    if (stripped || SENSITIVE_ENV_KEY.test(key)) {
+      if (value.length > 0) redact.push(value);
+    }
+    if (!stripped) {
+      env[key] = value;
+    }
+  }
+  return { env, redact };
+}
+
+/** True when `target` exists on disk, including broken symbolic links. */
+function pathExists(target: string): boolean {
+  try {
+    fs.lstatSync(target);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    return true;
+  }
+}
 
 async function gitRaw(
   cwd: string,
   args: string[],
-  options: { allowFailure?: boolean; timeoutMs?: number } = {},
+  options: { allowFailure?: boolean; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   try {
     const { stdout, stderr } = await execFileAsync(
@@ -48,7 +100,7 @@ async function gitRaw(
         timeout: options.timeoutMs ?? 60_000,
         maxBuffer: MAX_PATCH_BUFFER,
         windowsHide: true,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        env: options.env ?? { ...process.env, GIT_TERMINAL_PROMPT: "0" },
       },
     );
     return { stdout, stderr, code: 0 };
@@ -77,41 +129,54 @@ function terminalStatus(status: DelegationThreadStatus | string): boolean {
 }
 
 /**
- * Stages everything changed inside an isolated worktree relative to `baseCommit`
- * and produces the file list, binary-safe patch, and diffstat summary.
+ * Collects everything changed inside an isolated worktree relative to `baseCommit`
+ * using a temporary Git index (so the worktree's real index stays untouched) and
+ * produces the file list, binary-safe patch, and diffstat summary.
  */
 export async function collectWorktreeChanges(
   worktreePath: string,
   baseCommit: string,
 ): Promise<{ files: string[]; patch: string; stat: string }> {
-  await gitRaw(worktreePath, ["add", "-A"]);
-  const names = await gitRaw(worktreePath, [
-    "diff",
-    "--cached",
-    "--name-only",
-    "-z",
-    "--no-renames",
-    baseCommit,
-  ]);
-  const patch = await gitRaw(worktreePath, [
-    "diff",
-    "--cached",
-    "--binary",
-    "--no-renames",
-    baseCommit,
-  ]);
-  const stat = await gitRaw(worktreePath, [
-    "diff",
-    "--cached",
-    "--stat=200",
-    "--no-renames",
-    baseCommit,
-  ]);
-  return {
-    files: names.stdout.split("\0").filter(Boolean),
-    patch: patch.stdout,
-    stat: stat.stdout.trim(),
+  if (!isCommitOid(baseCommit)) {
+    throw new DelegationControlError(
+      "INVALID_ARGUMENT",
+      `Worktree baseline must be a full commit id: ${baseCommit}`,
+    );
+  }
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codexhost-wt-index-"));
+  const tempIndex = path.join(tempDir, "index");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_INDEX_FILE: tempIndex,
   };
+  try {
+    // Seed from HEAD so tracked-but-gitignored files are preserved without mutating .git/index.
+    await gitRaw(worktreePath, ["read-tree", "HEAD"], { allowFailure: true, env });
+    await gitRaw(worktreePath, ["add", "-A"], { env });
+    const names = await gitRaw(
+      worktreePath,
+      ["diff", "--cached", "--name-only", "-z", "--no-renames", baseCommit, "--"],
+      { env },
+    );
+    const patch = await gitRaw(
+      worktreePath,
+      ["diff", "--cached", "--binary", "--no-renames", baseCommit, "--"],
+      { env },
+    );
+    const stat = await gitRaw(
+      worktreePath,
+      ["diff", "--cached", "--stat=200", "--no-renames", baseCommit, "--"],
+      { env },
+    );
+    return {
+      files: names.stdout.split("\0").filter(Boolean),
+      patch: patch.stdout,
+      stat: stat.stdout.trim(),
+    };
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 /** Dry-runs `git apply --check`, then applies the patch unstaged into the main repository. */
@@ -134,30 +199,85 @@ export async function applyWorktreePatch(repoRoot: string, patchFile: string): P
   await gitRaw(repoRoot, ["apply", "--whitespace=nowarn", patchFile]);
 }
 
-/** Safely removes a worktree checkout and deletes its branch; missing artifacts are ignored. */
+/**
+ * Safely removes a worktree checkout and its branch. Only a registered, unlocked checkout at
+ * the managed path for the branch is removed; unregistered directories are never deleted.
+ */
 export async function removeWorktreeCheckout(
   repoRoot: string,
   worktreePath: string,
   branch: string,
 ): Promise<{ worktreeRemoved: boolean; branchRemoved: boolean }> {
-  let worktreeRemoved = true;
-  if (fs.existsSync(worktreePath)) {
-    const removed = await gitRaw(repoRoot, ["worktree", "remove", "--force", worktreePath], {
-      allowFailure: true,
-    });
-    if (removed.code !== 0) {
-      try {
-        await rm(worktreePath, { recursive: true, force: true });
-      } catch {
-        worktreeRemoved = false;
-      }
-    }
+  const repositoryExists = pathExists(repoRoot);
+  const worktreeExists = pathExists(worktreePath);
+  // A deleted source checkout may still be recoverable through the worktree's own Git link.
+  const cwd = repositoryExists ? repoRoot : worktreeExists ? worktreePath : undefined;
+  if (!cwd) return { worktreeRemoved: false, branchRemoved: false };
+
+  // Invalid branch names must not resolve to the repository's parent or the .worktrees directory.
+  const managedParent = await managedWorktreeParent(cwd);
+  const managedPath = await managedWorktreePath(cwd, branch);
+  // Refuse symbolic links at the managed directory or checkout path so non-managed targets stay safe.
+  if (
+    (await isSymbolicLink(managedParent)) ||
+    (await isSymbolicLink(managedPath)) ||
+    (await isSymbolicLink(worktreePath))
+  ) {
+    return { worktreeRemoved: false, branchRemoved: false };
   }
-  await gitRaw(repoRoot, ["worktree", "prune"], { allowFailure: true });
-  const branchResult = await gitRaw(repoRoot, ["branch", "-D", "--", branch], {
+  const canonicalWorktree = await resolveComparablePath(worktreePath);
+  // Never remove a checkout or delete a branch unless the recorded path matches the managed path.
+  if (!samePath(canonicalWorktree, managedPath)) {
+    return { worktreeRemoved: false, branchRemoved: false };
+  }
+  const listed = await gitRaw(cwd, ["worktree", "list", "--porcelain", "-z"], {
     allowFailure: true,
   });
-  return { worktreeRemoved, branchRemoved: branchResult.code === 0 };
+  if (listed.code !== 0) return { worktreeRemoved: false, branchRemoved: false };
+  const entries = parseWorktreeList(listed.stdout);
+  let entry: ReturnType<typeof parseWorktreeList>[number] | undefined;
+  for (const candidate of entries.slice(1)) {
+    if (samePath(await resolveComparablePath(candidate.path), canonicalWorktree)) {
+      entry = candidate;
+      break;
+    }
+  }
+  const mainPath = entries[0]?.path;
+  const gitCwd = mainPath && fs.existsSync(mainPath) ? mainPath : cwd;
+
+  if (entry && !entry.prunable) {
+    if (
+      entry.branch !== `refs/heads/${branch}` ||
+      entry.locked === true ||
+      !samePath(await resolveComparablePath(entry.path), managedPath)
+    ) {
+      return { worktreeRemoved: false, branchRemoved: false };
+    }
+    const removed = await gitRaw(gitCwd, ["worktree", "remove", "--force", "--", entry.path], {
+      allowFailure: true,
+    });
+    if (removed.code !== 0) return { worktreeRemoved: false, branchRemoved: false };
+    const branchResult = await gitRaw(gitCwd, ["branch", "-D", "--", branch], {
+      allowFailure: true,
+    });
+    return { worktreeRemoved: true, branchRemoved: branchResult.code === 0 };
+  }
+
+  // Only prune and drop the branch when Git still records a matching unlocked prunable entry
+  // whose directory is gone; never prune unrelated checkouts or delete detached/unmatched branches.
+  if (
+    worktreeExists ||
+    !entry?.prunable ||
+    entry.locked === true ||
+    entry.branch !== `refs/heads/${branch}`
+  ) {
+    return { worktreeRemoved: false, branchRemoved: false };
+  }
+  await gitRaw(gitCwd, ["worktree", "prune"], { allowFailure: true });
+  const branchResult = await gitRaw(gitCwd, ["branch", "-D", "--", branch], {
+    allowFailure: true,
+  });
+  return { worktreeRemoved: true, branchRemoved: branchResult.code === 0 };
 }
 
 export interface ThreadVerifyResult {
@@ -189,6 +309,8 @@ export interface ThreadDiscardResult {
   discarded: true;
   worktreeRemoved: boolean;
   branchRemoved: boolean;
+  /** Present when artifacts could not be removed and need manual inspection. */
+  note?: string;
 }
 
 function requireRecord(
@@ -199,7 +321,7 @@ function requireRecord(
   if (!record) {
     throw new DelegationControlError(
       "THREAD_NOT_FOUND",
-      `No governance record exists for Thread ${threadId}. Start the Thread with --tier, --scope, --check, or --worktree.`,
+      `No governance record exists for Thread ${threadId}. Start the Thread with --tier, --scope or --check to govern it; a plain --worktree delegation is not governed.`,
     );
   }
   return record;
@@ -208,20 +330,34 @@ function requireRecord(
 async function resolveCurrentStatus(
   api: Pick<DelegationControlApi, "read">,
   record: DelegationGovernanceRecord,
-): Promise<DelegationThreadStatus> {
+): Promise<{ status: DelegationThreadStatus; turnId?: string; cwd?: string }> {
   try {
     const snapshot = await api.read({ threadId: record.threadId, view: "result" });
-    return snapshot.status;
+    return {
+      status: snapshot.status,
+      ...(snapshot.turn?.turnId ? { turnId: snapshot.turn.turnId } : {}),
+      ...(snapshot.cwd ? { cwd: snapshot.cwd } : {}),
+    };
   } catch (error) {
-    if (terminalStatus(record.status)) return record.status as DelegationThreadStatus;
+    if (terminalStatus(record.status)) {
+      return { status: record.status as DelegationThreadStatus };
+    }
     throw error;
   }
 }
 
+async function listUntrackedFiles(worktreePath: string): Promise<Set<string> | undefined> {
+  const result = await gitRaw(worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"], {
+    allowFailure: true,
+  });
+  if (result.code !== 0) return undefined;
+  return new Set(result.stdout.split("\0").filter(Boolean));
+}
+
 /**
- * Verifies a finished governed Thread: runs declared checks in its workspace/worktree,
- * collects its binary patch relative to the baseline commit, audits out-of-scope files,
- * and persists the verification verdict.
+ * Verifies a finished governed Thread: collects its binary patch relative to the baseline commit
+ * BEFORE running checks (so check-generated files cannot pollute the patch or scope audit),
+ * runs declared checks in its workspace/worktree with secret redaction, and persists the verdict.
  */
 export async function verifyGovernedThread(input: {
   threadId: string;
@@ -230,7 +366,14 @@ export async function verifyGovernedThread(input: {
   environment?: NodeJS.ProcessEnv;
 }): Promise<ThreadVerifyResult> {
   const initial = requireRecord(input.store, input.threadId);
-  const currentStatus = await resolveCurrentStatus(input.api, initial);
+  if (initial.integration !== "none") {
+    throw new DelegationControlError(
+      "ALREADY_INTEGRATED",
+      `Thread ${initial.threadId} was already ${initial.integration}`,
+    );
+  }
+  const live = await resolveCurrentStatus(input.api, initial);
+  const currentStatus = live.status;
   if (!terminalStatus(currentStatus)) {
     throw new DelegationControlError(
       "THREAD_BUSY",
@@ -245,7 +388,7 @@ export async function verifyGovernedThread(input: {
     ...(initial.profile ? { explicitProfile: initial.profile } : {}),
   });
 
-  const targetCwd = initial.worktree?.path ?? initial.sourceRepoRoot;
+  const targetCwd = initial.worktree?.path ?? initial.sourceRepoRoot ?? initial.cwd ?? live.cwd;
   if (!targetCwd || !fs.existsSync(targetCwd)) {
     throw new DelegationControlError(
       "UNSUPPORTED",
@@ -253,32 +396,74 @@ export async function verifyGovernedThread(input: {
     );
   }
 
-  input.store.update(input.threadId, (draft) => {
-    draft.status = "verifying";
-  });
-
-  const executionOk = currentStatus === "completed";
-  const checks = executionOk
-    ? await runDelegationChecks(initial.checks, {
-        cwd: targetCwd,
-        timeoutMs: routing.checks.timeoutMinutes * 60_000,
-        logDir: input.store.paths(input.threadId).checksDir,
-        ...(routing.checks.shell ? { shell: routing.checks.shell } : {}),
-      })
-    : checksNotRun(initial.checks, `not run: the delegated Thread ended ${currentStatus}`);
-
+  // Collect changes before running checks so build/test artifacts created by checks are excluded.
+  // Re-verifying the same Turn reuses its patch: checks may rewrite tracked files after collection.
+  const reusePatch =
+    initial.worktree !== undefined &&
+    initial.verifiedTurnId !== undefined &&
+    live.turnId !== undefined &&
+    initial.verifiedTurnId === live.turnId &&
+    initial.patchPath !== undefined &&
+    fs.existsSync(initial.patchPath);
   let changedFiles: string[] = [];
   let patchStat = "";
   let patchPath: string | undefined;
-  if (initial.worktree) {
+  if (reusePatch) {
+    changedFiles = [...(initial.changedFiles ?? [])];
+    patchStat = initial.patchStat ?? "";
+    patchPath = initial.patchPath;
+  } else if (initial.worktree) {
     const collected = await collectWorktreeChanges(initial.worktree.path, initial.worktree.base);
     changedFiles = collected.files;
     patchStat = collected.stat;
     patchPath = input.store.writePatch(input.threadId, collected.patch);
   }
 
-  const strays = initial.write ? outOfScopeFiles(changedFiles, initial.scope) : [...changedFiles];
+  const checkEnv = buildCheckEnvironment(input.environment ?? process.env);
+  const executionOk = currentStatus === "completed";
   const warnings = [...initial.warnings];
+  const preCheckUntracked =
+    initial.worktree && executionOk && initial.checks.length > 0
+      ? await listUntrackedFiles(initial.worktree.path)
+      : undefined;
+  let checks: DelegationCheckResult[];
+  try {
+    checks = executionOk
+      ? await runDelegationChecks(initial.checks, {
+          cwd: targetCwd,
+          env: checkEnv.env,
+          redact: checkEnv.redact,
+          timeoutMs: routing.checks.timeoutMinutes * 60_000,
+          logDir: input.store.paths(input.threadId).checksDir,
+          ...(routing.checks.shell ? { shell: routing.checks.shell } : {}),
+        })
+      : checksNotRun(initial.checks, `not run: the delegated Thread ended ${currentStatus}`);
+  } finally {
+    // Clean up only untracked files created by checks so re-verifying never sweeps them into patches.
+    // Any failed listing makes the before/after difference unreliable, so leave files untouched.
+    if (initial.worktree && preCheckUntracked !== undefined) {
+      const postCheckUntracked = await listUntrackedFiles(initial.worktree.path);
+      if (postCheckUntracked !== undefined) {
+        const worktreeRoot = path.resolve(initial.worktree.path);
+        for (const relativeFile of postCheckUntracked) {
+          if (preCheckUntracked.has(relativeFile)) continue;
+          const fullPath = path.resolve(worktreeRoot, relativeFile);
+          const rel = path.relative(worktreeRoot, fullPath);
+          if (!rel || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel))
+            continue;
+          try {
+            fs.rmSync(fullPath, { recursive: true, force: true });
+          } catch (error) {
+            warnings.push(
+              `Could not remove check-generated file ${relativeFile}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      }
+    }
+  }
+
+  const strays = initial.write ? outOfScopeFiles(changedFiles, initial.scope) : [...changedFiles];
   if (
     initial.tier === "light" &&
     changedFiles.length > routing.light.maxChangedFiles &&
@@ -309,6 +494,8 @@ export async function verifyGovernedThread(input: {
     draft.patchStat = patchStat;
     draft.warnings = warnings;
     draft.verifiedAt = new Date().toISOString();
+    if (live.turnId !== undefined) draft.verifiedTurnId = live.turnId;
+    else delete draft.verifiedTurnId;
   });
 
   const record = saved ?? initial;
@@ -331,6 +518,8 @@ export async function verifyGovernedThread(input: {
 /**
  * Applies a governed worktree Thread's patch into its source repository (unstaged),
  * then removes the worktree and branch and releases its write-scope claim.
+ * Callers must hold `store.withThreadLock(threadId)` around this call; only the final
+ * patch-apply and state transition acquire the store-wide `store.withLock`.
  */
 export async function applyGovernedThread(input: {
   threadId: string;
@@ -339,6 +528,8 @@ export async function applyGovernedThread(input: {
   api: Pick<DelegationControlApi, "read">;
   store: DelegationGovernanceStore;
   environment?: NodeJS.ProcessEnv;
+  /** Serializes only patch application and integration persistence with other dispatches. */
+  withSourceLock?: <T>(operation: () => Promise<T>) => Promise<T>;
 }): Promise<ThreadApplyResult> {
   let record = requireRecord(input.store, input.threadId);
   if (record.integration !== "none") {
@@ -359,13 +550,28 @@ export async function applyGovernedThread(input: {
       `Thread ${record.threadId} has no isolated worktree patch to apply`,
     );
   }
-  if (!record.verifiedAt) {
-    await verifyGovernedThread({
+  const live = await resolveCurrentStatus(input.api, record);
+  if (!terminalStatus(live.status)) {
+    throw new DelegationControlError(
+      "THREAD_BUSY",
+      `Thread ${record.threadId} is still ${live.status}; wait for it to finish before applying`,
+    );
+  }
+  const patchCandidate = record.patchPath ?? input.store.paths(record.threadId).patchFile;
+  const staleVerification =
+    !record.verifiedAt ||
+    !fs.existsSync(patchCandidate) ||
+    live.turnId === undefined ||
+    live.turnId !== record.verifiedTurnId;
+  let verifiedStatus: DelegationThreadStatus | undefined;
+  if (staleVerification) {
+    const verified = await verifyGovernedThread({
       threadId: input.threadId,
       api: input.api,
       store: input.store,
       ...(input.environment ? { environment: input.environment } : {}),
     });
+    verifiedStatus = verified.status;
     record = requireRecord(input.store, input.threadId);
   }
   if (!record.worktree || !record.sourceRepoRoot) {
@@ -375,17 +581,24 @@ export async function applyGovernedThread(input: {
     );
   }
   const { worktree, sourceRepoRoot } = record;
-  if (!terminalStatus(record.status)) {
+  const effectiveStatus =
+    verifiedStatus ?? (record.verification === "failed" ? "failed" : live.status);
+  if (!terminalStatus(effectiveStatus)) {
     throw new DelegationControlError(
       "THREAD_BUSY",
-      `Thread ${record.threadId} is still ${record.status}`,
+      `Thread ${record.threadId} is still ${effectiveStatus}`,
     );
   }
-  if ((record.status !== "completed" || record.verification === "failed") && input.force !== true) {
+  if (
+    (effectiveStatus !== "completed" ||
+      record.verification === "failed" ||
+      (record.checks.length > 0 && record.verification !== "passed")) &&
+    input.force !== true
+  ) {
     throw new DelegationControlError(
       "CHECKS_FAILED",
-      `Thread ${record.threadId} ended ${record.status} (verification: ${record.verification ?? "unverified"}); pass --force true to apply anyway`,
-      { status: record.status, verification: record.verification },
+      `Thread ${record.threadId} ended ${effectiveStatus} (verification: ${record.verification ?? "unverified"}); pass --force true to apply anyway`,
+      { status: effectiveStatus, verification: record.verification },
     );
   }
   if ((record.outOfScope?.length ?? 0) > 0 && input.allowOutOfScope !== true) {
@@ -395,14 +608,27 @@ export async function applyGovernedThread(input: {
       { outOfScope: record.outOfScope },
     );
   }
-  const patchFile = record.patchPath ?? input.store.paths(record.threadId).patchFile;
-  await applyWorktreePatch(sourceRepoRoot, patchFile);
 
-  // Persist applied integration state BEFORE worktree cleanup so a cleanup failure
-  // never leaves an applied patch appearing unapplied.
-  input.store.update(record.threadId, (draft) => {
-    draft.integration = "applied";
-    draft.appliedAt = new Date().toISOString();
+  // Only patch application and integration persistence need the store-wide lock.
+  const withSourceLock =
+    input.withSourceLock ?? (<T>(operation: () => Promise<T>) => input.store.withLock(operation));
+  await withSourceLock(async () => {
+    const latest = requireRecord(input.store, input.threadId);
+    if (latest.integration !== "none") {
+      throw new DelegationControlError(
+        "ALREADY_INTEGRATED",
+        `Thread ${latest.threadId} was already ${latest.integration}`,
+      );
+    }
+    const patchFile = latest.patchPath ?? input.store.paths(latest.threadId).patchFile;
+    await applyWorktreePatch(sourceRepoRoot, patchFile);
+
+    // Persist applied integration state BEFORE worktree cleanup so a cleanup failure
+    // never leaves an applied patch appearing unapplied.
+    input.store.update(latest.threadId, (draft) => {
+      draft.integration = "applied";
+      draft.appliedAt = new Date().toISOString();
+    });
   });
 
   const cleanup = await removeWorktreeCheckout(
@@ -410,6 +636,10 @@ export async function applyGovernedThread(input: {
     worktree.path,
     worktree.branch,
   ).catch(() => ({ worktreeRemoved: false, branchRemoved: false }));
+  const leftovers: string[] = [];
+  if (!cleanup.worktreeRemoved) leftovers.push(`worktree ${worktree.path}`);
+  if (!cleanup.branchRemoved) leftovers.push(`branch ${worktree.branch}`);
+  const baseNote = "Changes were applied unstaged to your working tree. Review and commit them.";
 
   return {
     threadId: record.threadId,
@@ -417,7 +647,10 @@ export async function applyGovernedThread(input: {
     files: record.changedFiles ?? [],
     worktreeRemoved: cleanup.worktreeRemoved,
     branchRemoved: cleanup.branchRemoved,
-    note: "Changes were applied unstaged to your working tree. Review and commit them.",
+    note:
+      leftovers.length > 0
+        ? `${baseNote} Some artifacts could not be removed; inspect and clean them up manually: ${leftovers.join(", ")}.`
+        : baseNote,
   };
 }
 
@@ -434,7 +667,7 @@ export async function discardGovernedThread(input: {
       `Thread ${record.threadId} was already ${record.integration}`,
     );
   }
-  const currentStatus = await resolveCurrentStatus(input.api, record);
+  const { status: currentStatus } = await resolveCurrentStatus(input.api, record);
   if (!terminalStatus(currentStatus)) {
     throw new DelegationControlError(
       "THREAD_BUSY",
@@ -447,17 +680,26 @@ export async function discardGovernedThread(input: {
       record.sourceRepoRoot,
       record.worktree.path,
       record.worktree.branch,
-    );
+    ).catch(() => ({ worktreeRemoved: false, branchRemoved: false }));
   }
   input.store.update(record.threadId, (draft) => {
     draft.status = currentStatus;
     draft.integration = "discarded";
     draft.discardedAt = new Date().toISOString();
   });
+  const leftovers: string[] = [];
+  if (!cleanup.worktreeRemoved && record.worktree)
+    leftovers.push(`worktree ${record.worktree.path}`);
+  if (!cleanup.branchRemoved && record.worktree) leftovers.push(`branch ${record.worktree.branch}`);
   return {
     threadId: record.threadId,
     discarded: true,
     worktreeRemoved: cleanup.worktreeRemoved,
     branchRemoved: cleanup.branchRemoved,
+    ...(leftovers.length > 0
+      ? {
+          note: `Some artifacts could not be removed; inspect and clean them up manually: ${leftovers.join(", ")}.`,
+        }
+      : {}),
   };
 }

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { lstat, mkdir, rmdir } from "node:fs/promises";
+import { lstat, mkdir, realpath, rmdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -49,8 +49,231 @@ async function exists(file: string): Promise<boolean> {
   }
 }
 
+/** Whether `target` exists and is a symbolic link (does not follow links). */
+export async function isSymbolicLink(target: string): Promise<boolean> {
+  try {
+    return (await lstat(target)).isSymbolicLink();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 function invalid(message: string): DelegationControlError {
   return new DelegationControlError("INVALID_ARGUMENT", message);
+}
+
+const COMMIT_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
+
+/** Whether the value is a full lowercase Git object id (SHA-1 or SHA-256). */
+export function isCommitOid(value: unknown): value is string {
+  return typeof value === "string" && COMMIT_OID.test(value);
+}
+
+/** The directory name a managed worktree checkout uses for `branch`. */
+export function worktreeDirectoryName(branch: string): string {
+  if (typeof branch !== "string" || branch === "" || branch === "." || branch === "..")
+    throw invalid(`Invalid worktree branch directory: ${String(branch)}`);
+  const directory = branch.replace(/[^a-zA-Z0-9._-]/gu, "-");
+  if (!directory || directory === "." || directory === "..")
+    throw invalid(`Invalid worktree branch directory: ${branch}`);
+  return directory;
+}
+
+/** Compares paths as the platform does: separators normalized, and case-insensitively on Windows. */
+export function samePath(left: string, right: string): boolean {
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+/** Resolves a path for comparison, following symlinks on the path or its existing parent. */
+export async function resolveComparablePath(value: string): Promise<string> {
+  try {
+    return await realpath(value);
+  } catch {
+    const resolved = path.resolve(value);
+    const parent = path.dirname(resolved);
+    if (parent !== resolved) {
+      try {
+        return path.join(await realpath(parent), path.basename(resolved));
+      } catch {
+        return resolved;
+      }
+    }
+    return resolved;
+  }
+}
+
+function isWithin(child: string, parent: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return (
+    relative === "" ||
+    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  );
+}
+
+export interface WorktreeListEntry {
+  path: string;
+  branch?: string;
+  locked?: boolean;
+  prunable?: boolean;
+}
+
+/** Entries of `git worktree list --porcelain -z`, main working tree first. */
+export function parseWorktreeList(listed: string): WorktreeListEntry[] {
+  const entries: WorktreeListEntry[] = [];
+  for (const field of listed.split("\0")) {
+    if (field.startsWith("worktree ")) entries.push({ path: field.slice("worktree ".length) });
+    else if (entries.length === 0) continue;
+    else if (field.startsWith("branch "))
+      (entries.at(-1) as WorktreeListEntry).branch = field.slice("branch ".length);
+    else if (field === "locked" || field.startsWith("locked "))
+      (entries.at(-1) as WorktreeListEntry).locked = true;
+    else if (field === "prunable" || field.startsWith("prunable "))
+      (entries.at(-1) as WorktreeListEntry).prunable = true;
+  }
+  return entries;
+}
+
+/** The directory under which this repository's managed worktree checkouts live. */
+export async function managedWorktreeParent(root: string): Promise<string> {
+  const entries = parseWorktreeList(await git(root, ["worktree", "list", "--porcelain", "-z"]));
+  const main = entries[0]?.path;
+  if (!main || !path.isAbsolute(main)) throw invalid("Cannot determine the main Git worktree");
+  // Resolve symlinks only above the main checkout so a symlinked .worktrees dir cannot redirect it.
+  const mainParent = await resolveComparablePath(path.dirname(main));
+  return path.join(mainParent, `${path.basename(main)}.worktrees`);
+}
+
+/** The only checkout path this tooling creates for `branch`. */
+export async function managedWorktreePath(root: string, branch: string): Promise<string> {
+  const parent = await managedWorktreeParent(root);
+  const target = path.join(parent, worktreeDirectoryName(branch));
+  // A managed checkout is always one directory directly under the managed parent.
+  if (!samePath(path.dirname(target), parent))
+    throw invalid(`Invalid managed worktree path for branch: ${branch}`);
+  return target;
+}
+
+export interface VerifiedDelegationWorktree {
+  root: string;
+  worktree: DelegationWorktree;
+}
+
+/**
+ * Confirms that `worktree` is a linked checkout registered with the source checkout at
+ * `sourceRepoRoot` and on its recorded branch, and that `cwd` lies inside it. In-process callers
+ * use this defense even though the Host creates governed worktrees itself: apply writes into the
+ * source checkout and discard removes the worktree. Metadata is normalized to its known fields.
+ */
+export async function verifyDelegationWorktree(input: {
+  sourceRepoRoot: unknown;
+  worktree: unknown;
+  cwd?: string | undefined;
+}): Promise<VerifiedDelegationWorktree> {
+  if (!input.worktree || typeof input.worktree !== "object" || Array.isArray(input.worktree))
+    throw invalid("worktreeMetadata must be an object");
+  const candidate = input.worktree as Record<string, unknown>;
+  if (
+    typeof candidate.path !== "string" ||
+    !path.isAbsolute(candidate.path) ||
+    typeof candidate.branch !== "string" ||
+    !candidate.branch
+  )
+    throw invalid("worktreeMetadata must give an absolute worktree path and its branch");
+  if (!isCommitOid(candidate.base)) throw invalid("worktreeMetadata.base must be a full commit id");
+  const worktreePath = candidate.path;
+  const branch = candidate.branch;
+  const base = candidate.base;
+  if (typeof input.sourceRepoRoot !== "string" || !path.isAbsolute(input.sourceRepoRoot))
+    throw invalid("worktreeMetadata requires the absolute sourceRepoRoot it was created from");
+  let root: string;
+  try {
+    root = await git(input.sourceRepoRoot, ["rev-parse", "--show-toplevel"]);
+  } catch {
+    throw invalid(`sourceRepoRoot is not a Git working tree: ${input.sourceRepoRoot}`);
+  }
+  const canonicalRoot = await resolveComparablePath(root);
+  if (!samePath(canonicalRoot, await resolveComparablePath(input.sourceRepoRoot)))
+    throw invalid(`sourceRepoRoot must be the top level of its checkout: ${input.sourceRepoRoot}`);
+
+  // A base must be the full object id `git diff` can use as one revision, never an option or ref.
+  const resolvedBase = await git(root, [
+    "rev-parse",
+    "--verify",
+    "--end-of-options",
+    `${base}^{commit}`,
+  ]).catch(() => "");
+  if (resolvedBase !== base)
+    throw invalid(`worktreeMetadata.base is not a commit in ${root}: ${base}`);
+
+  const expectedPath = await managedWorktreePath(root, branch);
+  if (
+    (await isSymbolicLink(path.dirname(expectedPath))) ||
+    (await isSymbolicLink(expectedPath)) ||
+    (await isSymbolicLink(worktreePath))
+  )
+    throw invalid(`The delegation worktree path must not be a symbolic link: ${worktreePath}`);
+  const canonicalWorktree = await resolveComparablePath(worktreePath);
+  if (samePath(canonicalWorktree, canonicalRoot))
+    throw invalid("The delegation worktree must be separate from its source checkout");
+  if (!samePath(canonicalWorktree, expectedPath))
+    throw invalid(
+      `The delegation worktree must be the managed checkout for branch ${branch}: ${expectedPath}`,
+    );
+
+  const entries = parseWorktreeList(await git(root, ["worktree", "list", "--porcelain", "-z"]));
+  let entry: WorktreeListEntry | undefined;
+  for (const listed of entries) {
+    if (samePath(await resolveComparablePath(listed.path), canonicalWorktree)) {
+      entry = listed;
+      break;
+    }
+  }
+  const main = entries[0];
+  if (!entry || !main || samePath(await resolveComparablePath(main.path), canonicalWorktree))
+    throw invalid(`${worktreePath} is not a linked worktree of ${root} on branch ${branch}`);
+  if (entry.branch !== `refs/heads/${branch}`)
+    throw invalid(`${worktreePath} is not a linked worktree of ${root} on branch ${branch}`);
+  if (input.cwd !== undefined) {
+    const canonicalCwd = await resolveComparablePath(input.cwd);
+    if (!isWithin(canonicalCwd, canonicalWorktree))
+      throw invalid(`cwd must be inside the delegation worktree ${worktreePath}`);
+  }
+  const ancestor = await git(root, ["merge-base", "--is-ancestor", base, `refs/heads/${branch}`])
+    .then(() => true)
+    .catch(() => false);
+  if (!ancestor)
+    throw invalid(`worktreeMetadata.base is not an ancestor of branch ${branch}: ${base}`);
+
+  const normalized: DelegationWorktree = { path: worktreePath, branch, base };
+  if (candidate.includesUncommitted !== undefined) {
+    if (typeof candidate.includesUncommitted !== "boolean")
+      throw invalid("worktreeMetadata.includesUncommitted must be a boolean");
+    normalized.includesUncommitted = candidate.includesUncommitted;
+  }
+  if (candidate.untrackedCount !== undefined) {
+    if (
+      typeof candidate.untrackedCount !== "number" ||
+      !Number.isSafeInteger(candidate.untrackedCount) ||
+      candidate.untrackedCount < 0
+    )
+      throw invalid("worktreeMetadata.untrackedCount must be a non-negative integer");
+    normalized.untrackedCount = candidate.untrackedCount;
+  }
+  if (candidate.untracked !== undefined) {
+    if (
+      !Array.isArray(candidate.untracked) ||
+      candidate.untracked.length > MAX_UNTRACKED_LISTED ||
+      candidate.untracked.some((item) => typeof item !== "string")
+    )
+      throw invalid(
+        `worktreeMetadata.untracked must be an array of at most ${MAX_UNTRACKED_LISTED} strings`,
+      );
+    normalized.untracked = [...candidate.untracked];
+  }
+  return { root, worktree: normalized };
 }
 
 /** Checks the source checkout's own Git state, not another worktree's index. */
@@ -86,7 +309,7 @@ async function createWorktree(input: {
   branch: string;
   base?: string | undefined;
   includeUncommitted?: boolean | undefined;
-}): Promise<DelegationWorktree> {
+}): Promise<{ worktree: DelegationWorktree; root: string }> {
   const root = await checkRepository(input.cwd);
   // Validate the literal ref: --branch would expand checkout shorthand such as @{-1}.
   if (input.branch.startsWith("-") || input.branch === "HEAD")
@@ -133,14 +356,9 @@ async function createWorktree(input: {
       throw invalid(`Cannot resolve worktree base to a commit: ${input.base ?? "HEAD"}`);
     }
   }
-  // The first entry is the main working tree, even when cwd is a linked worktree.
-  const listed = await git(root, ["worktree", "list", "--porcelain", "-z"]);
-  const main = listed.split("\0")[0]?.slice("worktree ".length);
-  if (!main || !path.isAbsolute(main)) throw invalid("Cannot determine the main Git worktree");
-  const directory = input.branch.replace(/[^a-zA-Z0-9._-]/gu, "-");
-  const parent = path.join(path.dirname(main), `${path.basename(main)}.worktrees`);
+  const parent = await managedWorktreeParent(root);
   const worktree: DelegationWorktree = {
-    path: path.join(parent, directory),
+    path: path.join(parent, worktreeDirectoryName(input.branch)),
     branch: input.branch,
     base,
     ...(includesUncommitted !== undefined ? { includesUncommitted } : {}),
@@ -172,7 +390,7 @@ async function createWorktree(input: {
       worktree.path,
       input.branch,
     ]);
-    return worktree;
+    return { worktree, root };
   } catch (error) {
     if (branchCreated) {
       // A failed/timed-out checkout can leave files or registration; preserve and report them.
@@ -194,7 +412,10 @@ async function createWorktree(input: {
   }
 }
 
-/** Shared CLI/Host filesystem preparation; callers must resolve their own source cwd. */
+/**
+ * Shared CLI/Host filesystem preparation; callers must resolve their own source cwd.
+ * `start` receives the created worktree and the top level of the source checkout it came from.
+ */
 export async function startWithDelegationWorktree(
   input: {
     cwd?: string | undefined;
@@ -202,7 +423,20 @@ export async function startWithDelegationWorktree(
     base?: string | undefined;
     includeUncommitted?: boolean | undefined;
   },
-  start: (cwd: string | undefined, worktree?: DelegationWorktree) => Promise<unknown>,
+  start: (
+    cwd: string | undefined,
+    worktree?: DelegationWorktree,
+    sourceRoot?: string,
+  ) => Promise<unknown>,
+  /**
+   * Called when `start` failed before the child existed. Returning true means the caller
+   * reclaimed the checkout, so the original error is thrown without retained-worktree details.
+   */
+  onStartError?: (
+    error: unknown,
+    worktree: DelegationWorktree,
+    sourceRoot: string,
+  ) => Promise<boolean>,
 ): Promise<unknown> {
   if (input.branch === undefined) {
     if (input.base !== undefined) throw invalid("--base requires --worktree");
@@ -215,18 +449,19 @@ export async function startWithDelegationWorktree(
     throw invalid("base must be a non-empty ref");
   if (typeof input.cwd !== "string" || !path.isAbsolute(input.cwd))
     throw invalid("--worktree requires an absolute cwd");
-  const worktree = await createWorktree({
+  const { worktree, root } = await createWorktree({
     cwd: path.resolve(input.cwd),
     branch: input.branch,
     base: input.base,
     includeUncommitted: input.includeUncommitted,
   });
   try {
-    const result = await start(worktree.path, worktree);
+    const result = await start(worktree.path, worktree, root);
     if (!result || typeof result !== "object" || Array.isArray(result))
       throw new DelegationControlError("INTERNAL_ERROR", "Invalid delegation start response");
     return { ...result, worktree };
   } catch (error) {
+    if (await onStartError?.(error, worktree, root).catch(() => false)) throw error;
     // A failed response does not prove that the Thread never started.
     throw retainedError(error, worktree);
   }

@@ -267,7 +267,7 @@ export class HarnessDelegationCoordinator {
       throw new DelegationControlError(
         "HARNESS_NOT_FOUND",
         `Harness '${input.harnessId}' is unavailable`,
-        { validHarnessIds: ["codex", ...this.#adapters.keys()] },
+        { validHarnessIds: ["codex", ...this.#adapters.keys()], notStarted: true },
       );
     }
     const targetHarnessId = input.harnessId as ExternalHarnessId;
@@ -299,6 +299,7 @@ export class HarnessDelegationCoordinator {
         `Harness '${targetHarnessId}' is unavailable`,
         {
           validHarnessIds: ["codex", ...this.#adapters.keys()],
+          notStarted: true,
         },
       );
     }
@@ -307,7 +308,17 @@ export class HarnessDelegationCoordinator {
         harnessId: targetHarnessId,
         cwd: startInput.cwd,
       });
-      this.#validateConfiguration(inspected.inspection, input.model, input.thinkingOptionId);
+      try {
+        this.#validateConfiguration(inspected.inspection, input.model, input.thinkingOptionId);
+      } catch (error) {
+        if (error instanceof DelegationControlError) {
+          throw new DelegationControlError(error.code, error.message, {
+            ...error.details,
+            notStarted: true,
+          });
+        }
+        throw error;
+      }
     }
     const delegationId = hostThreadIdSchema.parse(randomUUID());
     const childThreadId = hostThreadIdSchema.parse(randomUUID());

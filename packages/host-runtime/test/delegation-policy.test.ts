@@ -8,6 +8,7 @@ import {
   holdsWriteScope,
   normalizeScopePath,
   outOfScopeFiles,
+  requestsGovernance,
   scopesOverlap,
   validateGovernancePolicy,
 } from "../src/delegation-policy.js";
@@ -29,6 +30,8 @@ describe("delegation policy and guardrails", () => {
       "../escape",
       "src/../escape",
       ".git/config",
+      ".GIT",
+      ".Git/hooks",
       "src/.git/hooks",
       "src//double",
       "src\\windows",
@@ -107,6 +110,7 @@ describe("delegation policy and guardrails", () => {
       integration: "none" as const,
       sourceRepoRoot: "/repo/app",
       scope: ["packages/b"],
+      worktree: { path: "/repo/app.worktrees/b" },
     };
     const applied = {
       threadId: "t-applied",
@@ -170,6 +174,99 @@ describe("delegation policy and guardrails", () => {
       }).write,
     ).toBe(false);
   });
+
+  it("treats an omitted write scope as the whole repository for conflicts", () => {
+    const holder = {
+      threadId: "t-running",
+      write: true,
+      status: "running",
+      integration: "none" as const,
+      sourceRepoRoot: "/repo/app",
+      scope: ["packages/a"],
+    };
+    expect(validateGovernancePolicy({}).claimsScope).toBe(true);
+    expect(() =>
+      validateGovernancePolicy({
+        sourceRepoRoot: "/repo/app",
+        existingRecords: [holder],
+      }),
+    ).toThrow(expect.objectContaining({ code: "SCOPE_CONFLICT" }));
+  });
+
+  it("holds a worktree write scope through terminal states until integration", () => {
+    const record = {
+      write: true,
+      integration: "none" as const,
+      claimsScope: true,
+      worktree: { path: "/repo/app.worktrees/a" },
+    };
+    for (const status of ["completed", "failed", "interrupted"]) {
+      expect(holdsWriteScope({ ...record, status })).toBe(true);
+    }
+    expect(holdsWriteScope({ ...record, status: "completed", integration: "applied" })).toBe(false);
+    expect(holdsWriteScope({ ...record, status: "completed", integration: "discarded" })).toBe(
+      false,
+    );
+
+    const direct = { write: true, integration: "none" as const, claimsScope: true };
+    expect(holdsWriteScope({ ...direct, status: "running" })).toBe(true);
+    expect(holdsWriteScope({ ...direct, status: "completed" })).toBe(false);
+  });
+
+  it("does not treat a same-request retry as its own conflict", () => {
+    const record = {
+      threadId: "t-retry",
+      write: true,
+      status: "running",
+      integration: "none" as const,
+      sourceRepoRoot: "/repo/app",
+      scope: ["."],
+      requestId: "request-1",
+      parentThreadId: "planner",
+    };
+    expect(() =>
+      validateGovernancePolicy({
+        sourceRepoRoot: "/repo/app",
+        existingRecords: [record],
+        requestId: "request-1",
+        parentThreadId: "planner",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateGovernancePolicy({
+        sourceRepoRoot: "/repo/app",
+        existingRecords: [record],
+        requestId: "request-1",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateGovernancePolicy({
+        sourceRepoRoot: "/repo/app",
+        existingRecords: [record],
+        requestId: "request-1",
+        parentThreadId: "someone-else",
+      }),
+    ).toThrow(expect.objectContaining({ code: "SCOPE_CONFLICT" }));
+  });
+
+  it("treats malformed governance options as governance intent", () => {
+    expect(requestsGovernance({})).toBe(false);
+    expect(requestsGovernance({ scope: [] })).toBe(false);
+    expect(requestsGovernance({ checks: [] })).toBe(false);
+    expect(requestsGovernance({ allowNestedDelegation: true })).toBe(false);
+    expect(requestsGovernance({ allowNestedDelegation: false })).toBe(true);
+    expect(requestsGovernance({ allowNestedDelegation: "false" })).toBe(true);
+    expect(requestsGovernance({ tier: "" })).toBe(true);
+    expect(requestsGovernance({ profile: "   " })).toBe(true);
+  });
+
+  it.skipIf(process.platform !== "win32")(
+    "compares scope coverage case-insensitively on Windows",
+    () => {
+      expect(coversScope("SRC", "src/A.ts")).toBe(true);
+      expect(scopesOverlap(["SRC"], ["src/nested"])).not.toBeNull();
+    },
+  );
 
   it("blocks recursive delegation from governed executor roles", () => {
     expect(() => checkExecutorRoleGuard({})).not.toThrow();

@@ -109,7 +109,7 @@ Out-of-scope edits require --allow-out-of-scope true after review; failed checks
   "thread discard": `codexhost thread discard <thread> [--format json|compact|text]
 Discard a finished governed Thread's worktree and branch and release its write-scope lock. Running Threads must be cancelled first.`,
   "thread keepalive": `codexhost thread keepalive [status|on|off] [--thread <thread>] [--format json|compact|text]
-Inspect or toggle Host-managed 55-minute prompt-cache keep-alive for idle planner Threads waiting on watched delegated children.`,
+Inspect or toggle Host-managed 55-minute prompt-cache keep-alive for idle planner Threads waiting on watched delegated children. Keep-alive is off by default and must be enabled in Settings; on/off only clears or applies a pause.`,
   "thread list": `codexhost thread list [--cwd <path>] [--parent <thread> | --client <name>] [--ref <uri>] [--limit <n>] [--cursor <cursor>] [--sort created-asc|created-desc|updated-asc|updated-desc|recency-asc|recency-desc] [--format json|compact|text]
 Find existing Threads by workspace, or use --parent to list a Thread's delegated children.
 Workspace listing defaults to the caller process cwd. Default limit 25 (maximum 100), sorted created-desc.

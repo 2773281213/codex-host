@@ -25,13 +25,50 @@ export const MAX_CHECKS = 20;
 export const MAX_CHECK_CHARS = 2_000;
 export const MAX_ACCEPTANCE_CHARS = 4_000;
 
-// Project-relative path rule: no leading slash, no `.`/`..`/`.git` segment,
+// Project-relative path rule: no leading slash, no `.`/`..`/`.git` (any case) segment,
 // no empty segment, no backslash, colon or control character. `.` alone means whole repo.
 const PATH_RULE =
-  /^(?!\/)(?!.*(?:^|\/)(?:\.\.?|\.git)(?:\/|$))(?!.*\/\/)(?!.*[\\:\u0000-\u001f\u007f])[^/].*[^/]$|^[^./\\:\u0000-\u001f\u007f]$/u;
+  /^(?!\/)(?!.*(?:^|\/)(?:\.\.?|\.[gG][iI][tT])(?:\/|$))(?!.*\/\/)(?!.*[\\:\u0000-\u001f\u007f])[^/].*[^/]$|^[^./\\:\u0000-\u001f\u007f]$/u;
 
 export function isDelegationTier(value: unknown): value is DelegationTier {
   return typeof value === "string" && (DELEGATION_TIERS as readonly string[]).includes(value);
+}
+
+/**
+ * A present field counts unless it is an empty list or a blank string; a malformed value still
+ * opts in, so validation rejects it instead of silently starting an ungoverned Thread.
+ */
+function requested(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "string") return value.trim() !== "";
+  return true;
+}
+
+/**
+ * Whether a start explicitly opts into governance. An isolated worktree alone does not:
+ * plain `--worktree` delegations keep their ungoverned behavior (no executor role, no scope
+ * lock, no verify/apply/discard). The CLI, the control server and the Registry all use this.
+ * A present but malformed tier, profile or allowNestedDelegation opts in so entry validation
+ * rejects it instead of silently starting an ungoverned executor.
+ */
+export function requestsGovernance(input: {
+  tier?: unknown;
+  profile?: unknown;
+  scope?: unknown;
+  checks?: unknown;
+  acceptance?: unknown;
+  allowNestedDelegation?: unknown;
+}): boolean {
+  const declared = (value: unknown): boolean => value !== undefined && value !== null;
+  return (
+    declared(input.tier) ||
+    declared(input.profile) ||
+    requested(input.scope) ||
+    requested(input.checks) ||
+    requested(input.acceptance) ||
+    (declared(input.allowNestedDelegation) && input.allowNestedDelegation !== true)
+  );
 }
 
 /** Validates and normalizes one scope entry (a project-relative file or directory path). */
@@ -52,9 +89,15 @@ export function normalizeScopePath(entry: unknown): string {
   return value;
 }
 
-/** Whether a scope entry covers a project-relative file path (directory-prefix semantics). */
+/**
+ * Whether a scope entry covers a project-relative file path (directory-prefix semantics).
+ * Windows file systems ignore case, so paths that differ only in case are the same file there.
+ */
 export function coversScope(entry: string, file: string): boolean {
-  return entry === "." || file === entry || file.startsWith(`${entry}/`);
+  if (entry === ".") return true;
+  const [scope, target] =
+    process.platform === "win32" ? [entry.toLowerCase(), file.toLowerCase()] : [entry, file];
+  return target === scope || target.startsWith(`${scope}/`);
 }
 
 /** The first pair of overlapping entries between two scopes, or null. */
@@ -84,20 +127,33 @@ export interface ScopeHoldingRecord {
   integration: "none" | "applied" | "discarded";
   sourceRepoRoot?: string;
   scope: readonly string[];
+  /** Absent means true; retained so records written by earlier versions keep their meaning. */
+  claimsScope?: boolean;
+  /** Present when the delegation runs in an isolated worktree whose patch is applied later. */
+  worktree?: { path: string };
+  /** Idempotency key and dispatching parent; a retry reuses the same values. */
+  requestId?: string;
+  parentThreadId?: string;
 }
 
-const LIVE_STATUSES = new Set(["creating", "queued", "running", "verifying"]);
+export const LIVE_DELEGATION_STATUSES: ReadonlySet<string> = new Set([
+  "creating",
+  "queued",
+  "running",
+  "verifying",
+]);
 
 /**
- * Whether a governed delegation still claims its write scope:
- * its execution is live, or it completed and its patch has been neither applied nor discarded.
+ * Whether a governed delegation still claims its write scope. A worktree delegation holds its
+ * scope until its patch is applied or discarded, including after the Thread stops. A delegation
+ * that edited the shared workspace directly has nothing left to integrate once it stops.
  */
 export function holdsWriteScope(
-  record: Pick<ScopeHoldingRecord, "write" | "status" | "integration">,
+  record: Pick<ScopeHoldingRecord, "write" | "status" | "integration" | "claimsScope" | "worktree">,
 ): boolean {
-  if (!record.write) return false;
-  if (LIVE_STATUSES.has(record.status)) return true;
-  return record.status === "completed" && record.integration === "none";
+  if (!record.write || record.claimsScope === false) return false;
+  if (record.worktree) return record.integration === "none";
+  return LIVE_DELEGATION_STATUSES.has(record.status);
 }
 
 /** Enforces the anti-recursion guard for executor Threads. */
@@ -121,12 +177,17 @@ export interface GovernancePolicyInput {
   sourceRepoRoot?: string;
   existingRecords?: readonly ScopeHoldingRecord[];
   maxLightScopeEntries?: number;
+  /** A retry with the same requestId from the same parent is not its own conflict. */
+  requestId?: string;
+  parentThreadId?: string;
 }
 
 export interface NormalizedGovernancePlan {
   tier?: DelegationTier;
   write: boolean;
   scope: string[];
+  /** Whether the delegation locks its effective scope against other writers (true for write tasks). */
+  claimsScope: boolean;
   checks: string[];
   acceptance?: string;
 }
@@ -227,7 +288,10 @@ export function validateGovernancePolicy(input: GovernancePolicyInput): Normaliz
     );
   }
 
+  // An undeclared write scope audits as, and claims, the whole repository. This matches the
+  // upstream behavior: a governed writer never runs beside another writer unnoticed.
   const effectiveScope = scope.length > 0 ? scope : ["."];
+  const claimsScope = write;
 
   if (write && input.sourceRepoRoot && input.existingRecords?.length) {
     const targetRepo = normalizeRepoKey(input.sourceRepoRoot);
@@ -235,6 +299,11 @@ export function validateGovernancePolicy(input: GovernancePolicyInput): Normaliz
       if (!existing.sourceRepoRoot || normalizeRepoKey(existing.sourceRepoRoot) !== targetRepo) {
         continue;
       }
+      const retry =
+        Boolean(input.requestId) &&
+        existing.requestId === input.requestId &&
+        (input.parentThreadId === undefined || existing.parentThreadId === input.parentThreadId);
+      if (retry) continue;
       if (!holdsWriteScope(existing)) continue;
       const existingScope = existing.scope.length > 0 ? existing.scope : ["."];
       const overlap = scopesOverlap(effectiveScope, existingScope);
@@ -258,6 +327,7 @@ export function validateGovernancePolicy(input: GovernancePolicyInput): Normaliz
     ...(tier ? { tier } : {}),
     write,
     scope: effectiveScope,
+    claimsScope,
     checks,
     ...(acceptance ? { acceptance } : {}),
   };

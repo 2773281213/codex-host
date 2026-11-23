@@ -3,7 +3,7 @@ import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-const SKILL_VERSION = 16;
+export const SKILL_VERSION = 17;
 export const DELEGATION_SKILL_NAME = "codexhost-delegation";
 const SKILL_RELATIVE_PATH = path.join("skills", DELEGATION_SKILL_NAME, "SKILL.md");
 const PREVIOUS_MANAGED_DIGESTS: readonly string[] = [
@@ -37,6 +37,12 @@ const PREVIOUS_MANAGED_DIGESTS: readonly string[] = [
   "41c2672e34b7a52dee9111f8284a4261b4dbcd42908262dcc814b323bb278e59",
   // v15, before tiered routing, scope/check governance, worktree apply/discard, and keep-alive.
   "1ff56f80948aae392c908ae87e7c3763d329c60fd305c4b1f1a29cf32b8f93a3",
+  // v16 (fork HEAD e7ac3387), before keep-alive became opt-in.
+  "d2c9bc91009cf642cc08132eee5ef5776249164fdcb164b8fc54ea2164e5c801",
+  // v16 published on origin/main (06482d30), installed by earlier releases.
+  "112f34807620f49b327f32d34345c100f9bea5515602acdc71592f7021c0ebf4",
+  // v16 intermediate revision fec97a49.
+  "cf78a1aa997d25c8090b752a7a8f5da8ec70a49c146f9beedb791af157afa40f",
 ];
 
 export const CODEXHOST_DELEGATION_SKILL = `---
@@ -98,8 +104,9 @@ Do not delegate recursively when running as a governed executor
 Then choose the next action from the user's request: send a follow-up, cancel,
 read now, answer a pending question, wait for a bounded period, check later, or
 watch it so the Host notifies this Thread once when it stops or needs input
-(while watched children run, the Host keeps idle Claude Code prompt caches warm
-automatically; inspect or toggle with \`thread keepalive\`).
+(while watched children run, prompt-cache keep-alive can keep idle Claude Code
+caches warm; it is off by default and must be enabled in Settings, while
+\`thread keepalive on|off\` only clears or applies a pause).
 You can also leave it running. A watch notification
 reports execution state only; read the Thread before judging or reporting its
 work. For governed worktree tasks, run \`thread verify <thread>\` (or pass \`--auto-verify true\` with \`--watch true\`) to run checks

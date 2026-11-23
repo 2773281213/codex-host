@@ -480,6 +480,21 @@ describe("DelegationWatchService", () => {
     await expect(service.watches()).resolves.toEqual({ watches: [] });
   });
 
+  it("marks ALREADY_INTEGRATED as a permanent delivery failure", async () => {
+    const fake = runtime({ child: { status: "running" }, parent: { status: "completed" } });
+    const service = new DelegationWatchService(fake, { pollIntervalMs: POLL_MS });
+    await service.watch({ threadId: "child", notifyThreadId: "parent", timeoutMs: 60_000 });
+    fake.update("child", { status: "completed" });
+    fake.sendFailures.push(
+      new DelegationControlError("ALREADY_INTEGRATED", "Thread was already applied"),
+    );
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    const { watches } = await service.watches();
+    expect(watches).toMatchObject([{ state: "undeliverable", outcome: "completed" }]);
+    expect(watches[0]?.reason).toContain("already applied");
+    expect(watches[0]?.reason).not.toContain("outcome unknown");
+  });
+
   it("does not retry a structured failure that does not prove the Turn never started", async () => {
     const fake = runtime({ child: { status: "running" }, parent: { status: "completed" } });
     const service = new DelegationWatchService(fake, { pollIntervalMs: POLL_MS });
@@ -582,6 +597,7 @@ describe("DelegationWatchService", () => {
     });
     fake.update("child", { status: "completed" });
     await vi.advanceTimersByTimeAsync(POLL_MS);
+    await vi.advanceTimersByTimeAsync(1);
     expect(verify).toHaveBeenCalledWith("child");
     expect(fake.sent).toHaveLength(1);
     expect(fake.sent[0]?.message).toContain(
@@ -604,10 +620,79 @@ describe("DelegationWatchService", () => {
     });
     fake.update("child", { status: "completed" });
     await vi.advanceTimersByTimeAsync(POLL_MS);
+    await vi.advanceTimersByTimeAsync(1);
     expect(verify).toHaveBeenCalledWith("child");
     expect(fake.sent).toHaveLength(1);
     expect(fake.sent[0]?.message).toContain(
       "Auto-verify could not run: no governed worktree recorded",
     );
+  });
+
+  it("keeps other watch notifications flowing while autoVerify runs slow checks", async () => {
+    const fake = runtime({
+      slow: { status: "running" },
+      fast: { status: "running" },
+      parent: { status: "completed" },
+    });
+    const slowVerify = Promise.withResolvers<{
+      threadId: string;
+      status: "completed";
+      integration: "none";
+      verification: "passed";
+      ok: true;
+      checks: [];
+      changedFiles: string[];
+      outOfScope: string[];
+      warnings: string[];
+    }>();
+    const verify = vi.fn(() => slowVerify.promise);
+    const service = new DelegationWatchService(fake, { pollIntervalMs: POLL_MS, verify });
+
+    await service.watch({
+      threadId: "slow",
+      notifyThreadId: "parent",
+      timeoutMs: 60_000,
+      autoVerify: true,
+    });
+    await service.watch({
+      threadId: "fast",
+      notifyThreadId: "parent",
+      timeoutMs: 60_000,
+    });
+
+    // Both complete at the same time; fast must deliver without waiting on slow's autoVerify.
+    fake.update("slow", { status: "completed" });
+    fake.update("fast", { status: "completed" });
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(verify).toHaveBeenCalledWith("slow");
+    expect(fake.sent).toHaveLength(1);
+    expect(parseThreadWatchNotice(fake.sent[0]?.message ?? "")).toEqual([
+      { threadId: "fast", label: "fast", outcome: "completed" },
+    ]);
+
+    // Subsequent polls while slow verify is still pending do not re-invoke verify.
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(fake.sent).toHaveLength(1);
+
+    // Once slow verify resolves, it nudges immediately and delivers the auto-verify notice.
+    slowVerify.resolve({
+      threadId: "slow",
+      status: "completed",
+      integration: "none",
+      verification: "passed",
+      ok: true,
+      checks: [],
+      changedFiles: ["src/slow.ts"],
+      outOfScope: [],
+      warnings: [],
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fake.sent).toHaveLength(2);
+    expect(fake.sent[1]?.message).toContain("thread://slow");
+    expect(fake.sent[1]?.message).toContain("Auto-verify verdict: passed");
+    await expect(service.watches()).resolves.toEqual({ watches: [] });
   });
 });

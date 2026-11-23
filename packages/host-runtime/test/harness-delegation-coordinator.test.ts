@@ -329,6 +329,25 @@ describe("HarnessDelegationCoordinator", () => {
     }
   });
 
+  it("marks an unknown Harness as not started before opening a session", async () => {
+    const value = await fixture();
+    try {
+      await expect(
+        value.coordinator.start({
+          harnessId: "missing-harness" as never,
+          parentThreadId: "parent",
+          cwd: "/synthetic",
+          task: "wrong harness",
+        }),
+      ).rejects.toMatchObject({
+        code: "HARNESS_NOT_FOUND",
+        details: { notStarted: true },
+      });
+    } finally {
+      await value.close();
+    }
+  });
+
   it("rejects invalid task names before opening a session", async () => {
     const value = await fixture();
     try {

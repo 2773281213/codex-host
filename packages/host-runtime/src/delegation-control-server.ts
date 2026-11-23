@@ -29,7 +29,9 @@ import type { HostInventory } from "./host-inventory.js";
 import { validateThreadExportInput, type ThreadExportInput } from "./delegation-thread-export.js";
 import { readThreadResultFile } from "./thread-result-file.js";
 import { validateReadOptions } from "./delegation-snapshot.js";
-import { resolveGitRepoRoot, startWithDelegationWorktree } from "./delegation-worktree.js";
+import { requestsGovernance } from "./delegation-policy.js";
+import { startWithDelegationWorktree } from "./delegation-worktree.js";
+import { removeWorktreeCheckout } from "./delegation-worktree-lifecycle.js";
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 
@@ -148,6 +150,14 @@ async function sendWithWatch(
   body: Record<string, unknown>,
 ): Promise<unknown> {
   const { watchTimeoutMs, notifyThreadId, autoVerify, ...send } = body;
+  if (autoVerify === true && typeof send.threadId === "string") {
+    const snapshot = await api.read({ threadId: send.threadId, view: "result" });
+    if (!snapshot.governance || snapshot.governance.integration !== "none")
+      throw new DelegationControlError(
+        "INVALID_ARGUMENT",
+        "--auto-verify requires a governed delegation (--tier, --scope or --check)",
+      );
+  }
   const result = await api.send(send as unknown as ThreadSendInput);
   const watch = await watchStartedTurn(watches, {
     threadId: result.threadId,
@@ -204,19 +214,27 @@ export async function routeDelegationRequest(
           "includeUncommitted must be a boolean",
         );
       }
+      const governed = requestsGovernance(start);
       const sourceCwd = typeof start.cwd === "string" ? start.cwd : undefined;
-      const attachGovernanceWorktree = Boolean(
-        handlers.governanceApi ||
-        start.tier !== undefined ||
-        start.scope !== undefined ||
-        start.checks !== undefined ||
-        start.acceptance !== undefined ||
-        includeUncommitted === true,
-      );
-      const sourceRepoRoot =
-        attachGovernanceWorktree && sourceCwd
-          ? ((await resolveGitRepoRoot(sourceCwd)) ?? undefined)
-          : undefined;
+      // The Host creates governed worktrees itself; metadata from a request is never trusted.
+      delete start.worktreeMetadata;
+      delete start.sourceRepoRoot;
+      if (!governed && start.autoVerify === true) {
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "--auto-verify requires a governed delegation (--tier, --scope or --check)",
+        );
+      }
+      if (
+        typeof worktree === "string" &&
+        worktree.trim() !== "" &&
+        handlers.governanceApi?.preflightStart !== undefined
+      ) {
+        await handlers.governanceApi.preflightStart({
+          ...(start as unknown as DelegationStartInput),
+          ...(sourceCwd !== undefined ? { cwd: sourceCwd } : {}),
+        });
+      }
       return startWithDelegationWorktree(
         {
           cwd: sourceCwd,
@@ -224,18 +242,28 @@ export async function routeDelegationRequest(
           base: base as string | undefined,
           includeUncommitted: includeUncommitted as boolean | undefined,
         },
-        (cwd, createdWorktree) => {
+        (cwd, createdWorktree, sourceRoot) => {
           const input: Record<string, unknown> = {
             ...start,
             ...(cwd !== undefined ? { cwd } : {}),
-            ...(attachGovernanceWorktree && sourceRepoRoot ? { sourceRepoRoot } : {}),
-            ...(attachGovernanceWorktree && createdWorktree
-              ? { worktreeMetadata: createdWorktree }
+            ...(governed && createdWorktree
+              ? { sourceRepoRoot: sourceRoot, worktreeMetadata: createdWorktree }
               : {}),
           };
           return input.watchTimeoutMs === undefined
             ? handlers.api.start(input as unknown as DelegationStartInput)
             : startWithWatch(handlers.api, watchApi(handlers.watchApi), input);
+        },
+        async (error, createdWorktree, sourceRoot) => {
+          if (!governed || !createdWorktree) return false;
+          if (!(error instanceof DelegationControlError) || error.details?.notStarted !== true)
+            return false;
+          const cleanup = await removeWorktreeCheckout(
+            sourceRoot,
+            createdWorktree.path,
+            createdWorktree.branch,
+          ).catch(() => ({ worktreeRemoved: false, branchRemoved: false }));
+          return cleanup.worktreeRemoved;
         },
       );
     }

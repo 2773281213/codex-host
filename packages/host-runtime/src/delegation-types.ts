@@ -401,7 +401,10 @@ export interface DelegationRoutingMutateResult {
   key: string;
   value?: unknown;
   removed: boolean;
-  routing: DelegationRoutingConfig;
+  /** Omitted when the write succeeded but the combined configuration is invalid. */
+  routing?: DelegationRoutingConfig;
+  /** Present when the file write succeeded but loading the combined routing failed. */
+  warning?: string;
 }
 
 export interface ThreadVerifyInput {
@@ -425,6 +428,11 @@ export interface ThreadKeepAliveInput {
 
 /** Optional governance API: tiered routing profiles, verification checks, and worktree apply/discard. */
 export interface DelegationGovernanceApi {
+  /**
+   * Runs a governed start's checks (executor role, routing, tier rules, scope conflicts) without
+   * starting anything, so a rejected start never leaves a freshly created worktree behind.
+   */
+  preflightStart?(input: DelegationStartInput): Promise<{ ok: true }>;
   routingShow(input?: DelegationRoutingShowInput): Promise<DelegationRoutingConfig>;
   routingSet(input: DelegationRoutingMutateInput): Promise<DelegationRoutingMutateResult>;
   routingUnset(input: DelegationRoutingMutateInput): Promise<DelegationRoutingMutateResult>;
