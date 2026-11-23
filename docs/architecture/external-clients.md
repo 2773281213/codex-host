@@ -43,17 +43,17 @@ HTTP 与 MCP 的以下参数及 JSON 结果和 CLI 对齐（HTTP 用 `threadId`�
 
 | HTTP | MCP | 参数与结果 |
 | --- | --- | --- |
-| `POST /v1/thread/send` | `thread_send` | `message`、可选布尔值 `interrupt` 与 `steer`、`watch` 及正整数 `watchTimeoutMs` |
-| `POST /v1/delegate/start` | `delegate_start` | 可选 `worktree`（新分支名）、`base`（Git ref）、`watch` 及 `watchTimeoutMs` |
+| `POST /v1/thread/send` | `thread_send` | `message`、可选布尔值 `interrupt` 与 `steer`、`watch`、正整数 `watchTimeoutMs` 及 `autoVerify` |
+| `POST /v1/delegate/start` | `delegate_start` | 可选 `worktree`（新分支名）、`base`（Git ref）、`includeUncommitted`、`watch`、`watchTimeoutMs`、`autoVerify`，以及治理参数 `tier`/`profile`/`scope`/`checks`/`acceptance`/`allowNestedDelegation` |
 | `POST /v1/thread/watches` | `thread_watches` | 原样返回 Host 的 watches，含 `taskName`、`threadStatus`、`watchedForMs` |
 
 `interrupt: true` 先取消活动 Turn、确认空闲后只发送一次，读取、取消和等待停下共用 30 秒期限；取消失败或超时不发送。目标空闲时直接发送，不排队、不自动重试，保留已有 watch 并抑制临时停下通知。省略或 `false` 保持普通 send 行为。
 
 `steer: true` 与 CLI 的 `--steer true` 相同：空闲 Thread 启动新 Turn；运行中 Thread 复用 Desktop 的调整方向操作，原生 Codex 使用 `turn/steer`，外部 Harness 按能力原生接受或沿既有停止后重发路径。成功回执只表示已接受输入，不表示已在当前轮执行或任务完成。`steer: true` 与 `interrupt: true` 互斥，同时请求在发送前以 `INVALID_ARGUMENT` 拒绝。省略或 `false` 保留忙时 `THREAD_BUSY`。
 
-`watch: true` 在成功 start / send 后观察，默认 29 分钟；`watchTimeoutMs` 必须是正整数。为兼容 CLI 控制协议，单独提供 `watchTimeoutMs` 也会启用 watch；显式 `watch: false` 时不能提供超时。响应的 `watch` 与 CLI 相同：`watching` / `alreadyTerminal`（含 Thread、通知目标、状态、超时），或 `{state: "notRegistered", reason}`。watch 注册失败不撤销成功的消息提交；未请求时不增加 `watch` 字段。无父 Thread 的委派和未指定通知 Thread 的 send 均向调用客户端的事件日志投递，不启动通知 Turn。见 [Thread watch](thread-watch.md)。
+`watch: true` 在成功 start / send 后观察，默认 29 分钟；`watchTimeoutMs` 必须是正整数。为兼容 CLI 控制协议，单独提供 `watchTimeoutMs` 也会启用 watch；显式 `watch: false` 时不能提供超时。配合受治理委派时可传 `autoVerify: true`（在 `delegate start` 上要求显式启用治理），完成时在后台异步运行检查并把结果写入通知，不阻塞其他 watch 的轮询与投递。响应的 `watch` 与 CLI 相同：`watching` / `alreadyTerminal`（含 Thread、通知目标、状态、超时），或 `{state: "notRegistered", reason}`。watch 注册失败不撤销成功的消息提交；未请求时不增加 `watch` 字段。无父 Thread 的委派和未指定通知 Thread 的 send 均向调用客户端的事件日志投递，不启动通知 Turn。见 [Thread watch](thread-watch.md)。
 
-`worktree` 在接收请求的 Host 上创建，源目录必须是请求显式给出的绝对 `cwd`（有父 Thread 也必须提供），拒绝相对路径；`base` 仅与 worktree 同用，默认源 checkout 的 HEAD。创建路径、分支校验及目录净化与 CLI 共用实现；返回 `worktree: {path, branch, base}`（base 是提交 SHA）。创建后委派失败时保留分支和目录，错误保留原代码及 details，并附 `details.worktree`、`details.worktreeRetained: true`。不会自动合并、清理或复用已有分支；`requestId` 不使 worktree 创建幂等。CLI 仍在本地创建，以 `--cwd` 或调用进程 cwd 为源目录。见 [委派 worktree](delegation-worktrees.md)。
+`worktree` 在 HTTP / MCP 入口一律在接收请求的 Host 上创建，源目录必须是请求显式给出的绝对 `cwd`（有父 Thread 也必须提供），拒绝相对路径；`base` 仅与 worktree 同用，默认源 checkout 的 HEAD；`includeUncommitted: true` 与 `base` 互斥，通过 `git stash create` 纳入已跟踪的未提交改动。Host 会丢弃所有入口请求体里自带的 `worktreeMetadata` 和 `sourceRepoRoot`，并在创建前执行 preflight（执行者防递归；受治理任务还检查路由、tier 规则、范围与 worktree 占用冲突）。创建路径、分支校验及目录净化与 CLI 共用实现；返回 `worktree: {path, branch, base}`（base 是完整提交 SHA）。普通 `worktree` 不受治理（不写治理记录、不占范围锁、不支持 `verify`/`apply`/`discard`），创建后委派失败时保留分支和目录并在错误中附 `details.worktree`、`details.worktreeRetained: true`；受治理 `worktree` 若在子 Thread 启动前失败（`notStarted: true`）会由 Host 自动回收刚建好的 worktree 与分支。不会自动合并或复用已有分支；`requestId` 不使 worktree 创建幂等。CLI 仅在普通（非受治理）`--worktree` 时本地创建，受治理 `--worktree` 改为转发给 Host 创建。见 [委派 worktree](delegation-worktrees.md) 与 [委派治理](delegation-governance.md)。
 
 `taskName` 为当前或最后已知标题，无法读取 Thread 时省略 `threadStatus`；`watchedForMs` 含 Host 停机时间。MCP 不重新投影 watch 列表。文件输入 `--task-file` / `--message-file` 和 `--format text` 属于 CLI 本地功能，HTTP / MCP 直接传文本并返回 JSON。
 
