@@ -367,24 +367,54 @@ describe("public authenticated owner channel", () => {
     const initial = await a.request("codexhost/delegation/routing/get", {});
     expect(initial).toMatchObject({
       profile: "thread16",
+      configuredDefaultProfile: null,
       routeSpecs: { deep: "codex", light: "deepseek-harness", review: "claude-code" },
     });
     const updated = await a.request("codexhost/delegation/routing/set", {
       user: true,
-      profile: "codex-planner",
+      editProfile: "codex-planner",
       routes: { deep: "claude-code:opus@high" },
     });
     expect(updated).toMatchObject({
       profile: "codex-planner",
+      configuredDefaultProfile: null,
       routeSpecs: {
         deep: "claude-code:opus@high",
         light: "deepseek-harness",
         review: "codex",
       },
     });
-    expect(await b.request("codexhost/delegation/routing/get", {})).toMatchObject({
+    // Planner auto selection stays intact: codex still picks codex-planner, claude-code picks thread16.
+    expect(await b.request("codexhost/delegation/routing/get", { planner: "codex" })).toMatchObject(
+      {
+        profile: "codex-planner",
+        configuredDefaultProfile: null,
+        routeSpecs: { deep: "claude-code:opus@high" },
+      },
+    );
+    expect(
+      await b.request("codexhost/delegation/routing/get", { planner: "claude-code" }),
+    ).toMatchObject({
+      profile: "thread16",
+      configuredDefaultProfile: null,
+    });
+    // Pinning and clearing defaultProfile works over the client channel.
+    expect(
+      await a.request("codexhost/delegation/routing/set", {
+        user: true,
+        defaultProfile: "codex-planner",
+      }),
+    ).toMatchObject({
       profile: "codex-planner",
-      routeSpecs: { deep: "claude-code:opus@high" },
+      configuredDefaultProfile: "codex-planner",
+    });
+    expect(
+      await a.request("codexhost/delegation/routing/set", {
+        user: true,
+        defaultProfile: null,
+      }),
+    ).toMatchObject({
+      configuredDefaultProfile: null,
     });
   });
   it("rejects unauthenticated/browser-origin traffic and official Thread execution", async () => {

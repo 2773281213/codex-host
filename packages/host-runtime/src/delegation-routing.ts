@@ -20,6 +20,7 @@ export const DELEGATION_PROFILE_ENV = "CODEXHOST_DELEGATION_PROFILE";
 const HARNESS_ID_RULE = /^[a-z0-9][a-z0-9-]{0,63}$/u;
 const MODEL_NAME_RULE = /^[A-Za-z0-9._:/@+[\]-]{1,160}$/u;
 const TOP_KEYS = new Set(["profile", "profiles", "plannerProfiles", "checks", "light"]);
+const RESERVED_OBJECT_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const MAX_MINUTES = 24 * 60;
 
 export interface DelegationTierRoute {
@@ -40,6 +41,8 @@ export interface DelegationRoutingConfig {
   planner: string;
   profile: string;
   profileReason: string;
+  /** Top-level `profile` configured in routing files, or `null` when automatic planner selection applies. */
+  configuredDefaultProfile: string | null;
   routes: Readonly<Record<DelegationTier, Readonly<DelegationTierRoute>>>;
   profiles: Readonly<
     Record<string, Readonly<Record<DelegationTier, Readonly<DelegationTierRoute>>>>
@@ -212,7 +215,11 @@ function checkMinutes(value: unknown, where: string): number {
 /** Builds effective tiered delegation routing from layered files (lowest precedence first). */
 export function buildDelegationRoutingConfig(
   input: {
-    layers?: readonly { file: string; data: DelegationRoutingLayerData }[];
+    layers?: readonly {
+      file: string;
+      data: DelegationRoutingLayerData;
+      scope?: "user" | "project";
+    }[];
     environment?: NodeJS.ProcessEnv;
     plannerHarnessId?: string;
     explicitProfile?: string;
@@ -230,15 +237,19 @@ export function buildDelegationRoutingConfig(
   const light = { ...DEFAULT_DELEGATION_ROUTING.light };
   let fileProfile: string | undefined;
 
-  for (const { file, data } of layers) {
+  for (const { file, data, scope } of layers) {
     for (const key of Object.keys(data)) {
       if (!TOP_KEYS.has(key)) throw invalid(`${file}: unknown routing key "${key}"`);
     }
     if (data.profiles !== undefined) {
       if (!isObject(data.profiles)) throw invalid(`${file}: profiles must be an object`);
       for (const [name, mapping] of Object.entries(data.profiles)) {
+        if (RESERVED_OBJECT_KEYS.has(name)) {
+          throw invalid(`${file}: profile name "${name}" is reserved`);
+        }
         if (!isObject(mapping)) throw invalid(`${file}: profile "${name}" must be an object`);
-        rawProfiles[name] = { ...(rawProfiles[name] ?? {}), ...mapping };
+        const existing = Object.hasOwn(rawProfiles, name) ? rawProfiles[name] : undefined;
+        rawProfiles[name] = { ...(existing ?? {}), ...mapping };
       }
     }
     if (data.plannerProfiles !== undefined) {
@@ -246,7 +257,7 @@ export function buildDelegationRoutingConfig(
         throw invalid(`${file}: plannerProfiles must be an object`);
       }
       for (const [plannerId, profileName] of Object.entries(data.plannerProfiles)) {
-        if (!HARNESS_ID_RULE.test(plannerId)) {
+        if (RESERVED_OBJECT_KEYS.has(plannerId) || !HARNESS_ID_RULE.test(plannerId)) {
           throw invalid(`${file}: plannerProfiles.${plannerId} is not a valid Harness ID`);
         }
         if (typeof profileName !== "string" || !profileName.trim()) {
@@ -261,6 +272,11 @@ export function buildDelegationRoutingConfig(
         if (key === "timeoutMinutes") {
           checks.timeoutMinutes = checkMinutes(value, `${file}: checks.timeoutMinutes`);
         } else if (key === "shell") {
+          if (scope !== "user") {
+            throw invalid(
+              `${file}: checks.shell can only be configured in the user routing config, not in project config. Remove checks.shell from this file or run "codexhost delegate routing unset checks.shell" in this repository.`,
+            );
+          }
           if (typeof value !== "string" || !value.trim()) {
             throw invalid(`${file}: checks.shell must be a non-empty shell path or name`);
           }
@@ -311,7 +327,7 @@ export function buildDelegationRoutingConfig(
   }
 
   for (const [plannerId, profileName] of Object.entries(filePlannerProfiles)) {
-    if (!normalizedProfiles[profileName]) {
+    if (!Object.hasOwn(normalizedProfiles, profileName)) {
       throw invalid(`plannerProfiles.${plannerId} references undefined profile "${profileName}"`);
     }
   }
@@ -329,13 +345,13 @@ export function buildDelegationRoutingConfig(
   } else if (envProfile) {
     profile = envProfile;
     profileReason = DELEGATION_PROFILE_ENV;
-  } else if (filePlannerProfiles[planner]) {
+  } else if (Object.hasOwn(filePlannerProfiles, planner) && filePlannerProfiles[planner]) {
     profile = filePlannerProfiles[planner];
     profileReason = `plannerProfiles.${planner} in routing config`;
   } else if (fileProfile !== undefined) {
     profile = fileProfile;
     profileReason = "profile in routing config";
-  } else if (builtInPlannerProfiles[planner]) {
+  } else if (Object.hasOwn(builtInPlannerProfiles, planner) && builtInPlannerProfiles[planner]) {
     profile = builtInPlannerProfiles[planner];
     profileReason = `built-in default for a ${planner} planner`;
   } else {
@@ -343,7 +359,9 @@ export function buildDelegationRoutingConfig(
     profileReason = "built-in default";
   }
 
-  const routes = normalizedProfiles[profile];
+  const routes = Object.hasOwn(normalizedProfiles, profile)
+    ? normalizedProfiles[profile]
+    : undefined;
   if (!routes) {
     throw invalid(
       `Routing profile "${profile}" is not defined (known: ${Object.keys(normalizedProfiles).join(", ")})`,
@@ -354,6 +372,7 @@ export function buildDelegationRoutingConfig(
     planner,
     profile,
     profileReason,
+    configuredDefaultProfile: fileProfile ?? null,
     routes,
     profiles: Object.freeze(normalizedProfiles),
     plannerProfiles: Object.freeze({ ...builtInPlannerProfiles, ...filePlannerProfiles }),
@@ -368,14 +387,22 @@ export function loadDelegationRoutingLayers(
     repoRoot?: string;
     environment?: NodeJS.ProcessEnv;
   } = {},
-): Array<{ file: string; data: DelegationRoutingLayerData }> {
-  const layers: Array<{ file: string; data: DelegationRoutingLayerData }> = [];
+): Array<{ file: string; data: DelegationRoutingLayerData; scope: "user" | "project" }> {
+  const layers: Array<{
+    file: string;
+    data: DelegationRoutingLayerData;
+    scope: "user" | "project";
+  }> = [];
   const userFile = userDelegationRoutingPath(input.environment);
   const projectFile = input.repoRoot ? projectDelegationRoutingPath(input.repoRoot) : null;
-  for (const file of [userFile, projectFile]) {
-    if (!file || layers.some((existing) => existing.file === file)) continue;
+  const candidates: Array<{ file: string | null; scope: "user" | "project" }> = [
+    { file: userFile, scope: "user" },
+    { file: projectFile, scope: "project" },
+  ];
+  for (const { file, scope } of candidates) {
+    if (!file || layers.some((existing) => sameFilePath(existing.file, file))) continue;
     const data = readLayerFile(file);
-    if (data) layers.push({ file, data });
+    if (data) layers.push({ file, data, scope });
   }
   return layers;
 }
@@ -396,6 +423,28 @@ export function loadDelegationRoutingConfig(
   });
 }
 
+const RETRY_WAIT_ARRAY = new Int32Array(new SharedArrayBuffer(4));
+
+function sameFilePath(left: string, right: string): boolean {
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function inferRoutingFileScope(
+  file: string,
+  explicitScope: "user" | "project" | undefined,
+  layersBelow?: readonly { file: string; scope?: "user" | "project" }[],
+  environment?: NodeJS.ProcessEnv,
+): "user" | "project" | undefined {
+  if (explicitScope) return explicitScope;
+  if (layersBelow?.some((layer) => layer.scope === "user")) return "project";
+  if (environment !== undefined) {
+    return sameFilePath(file, userDelegationRoutingPath(environment)) ? "user" : "project";
+  }
+  return undefined;
+}
+
 /** Retries atomic rename briefly on Windows where antivirus/readers can transiently lock target files. */
 export function renameSyncWithRetry(source: string, target: string): void {
   const retryable = new Set(["EPERM", "EACCES", "EBUSY"]);
@@ -411,10 +460,7 @@ export function renameSyncWithRetry(source: string, target: string): void {
       ) {
         throw error;
       }
-      const until = Date.now() + 25;
-      while (Date.now() < until) {
-        /* brief synchronous backoff for atomic config replacement on Windows */
-      }
+      Atomics.wait(RETRY_WAIT_ARRAY, 0, 0, 25);
     }
   }
 }
@@ -424,7 +470,13 @@ export function writeDelegationRoutingSetting(input: {
   key: string;
   value?: unknown;
   unset?: boolean;
-  layersBelow?: readonly { file: string; data: DelegationRoutingLayerData }[];
+  scope?: "user" | "project";
+  environment?: NodeJS.ProcessEnv;
+  layersBelow?: readonly {
+    file: string;
+    data: DelegationRoutingLayerData;
+    scope?: "user" | "project";
+  }[];
 }): { file: string; key: string; value?: unknown; removed: boolean } {
   const rule = SETTABLE_PATTERNS.find((entry) => entry.pattern.test(input.key));
   if (!rule) {
@@ -432,12 +484,27 @@ export function writeDelegationRoutingSetting(input: {
       `"${input.key}" cannot be set here (settable: ${SETTABLE_ROUTING_KEYS.join(", ")})`,
     );
   }
+  const inferredScope = inferRoutingFileScope(
+    input.file,
+    input.scope,
+    input.layersBelow,
+    input.environment,
+  );
+  if (input.key === "checks.shell" && !input.unset && inferredScope !== "user") {
+    throw invalid(
+      "checks.shell can only be configured in the user routing config, not in project config",
+    );
+  }
+  const targetScope: "user" | "project" = inferredScope ?? "project";
   const data = (readLayerFile(input.file) ?? {}) as Record<string, unknown>;
   const parts = input.key.split(".");
+  if (parts.some((part) => RESERVED_OBJECT_KEYS.has(part))) {
+    throw invalid(`"${input.key}" contains a reserved property name`);
+  }
   let cursor = data;
   let missing = false;
   for (const part of parts.slice(0, -1)) {
-    if (!isObject(cursor[part])) {
+    if (!Object.hasOwn(cursor, part) || !isObject(cursor[part])) {
       if (input.unset) {
         missing = true;
         break;
@@ -463,7 +530,7 @@ export function writeDelegationRoutingSetting(input: {
   buildDelegationRoutingConfig({
     layers: [
       ...(input.layersBelow ?? []),
-      { file: input.file, data: data as DelegationRoutingLayerData },
+      { file: input.file, data: data as DelegationRoutingLayerData, scope: targetScope },
     ],
   });
 
@@ -495,6 +562,7 @@ export function readDelegationRoutingSnapshot(
   return delegationRoutingSnapshotSchema.parse({
     profile: config.profile,
     profileReason: config.profileReason,
+    configuredDefaultProfile: config.configuredDefaultProfile,
     availableProfiles: Object.keys(config.profiles),
     routes: {
       deep: { ...config.routes.deep },
@@ -512,34 +580,47 @@ export function readDelegationRoutingSnapshot(
   });
 }
 
-/** Atomically applies profile and/or tier route updates from Desktop/Web settings and returns the confirmed snapshot. */
+/** Atomically applies default profile and/or tier route updates from Desktop/Web settings and returns the confirmed snapshot. */
 export function applyDelegationRoutingPatch(
   params: DelegationRoutingSetParams,
   environment: NodeJS.ProcessEnv = process.env,
 ): DelegationRoutingSnapshot {
   const useUser = params.user !== false || !params.repoRoot;
-  const targetFile = useUser
-    ? userDelegationRoutingPath(environment)
-    : projectDelegationRoutingPath(params.repoRoot as string);
+  const userFile = userDelegationRoutingPath(environment);
+  const targetFile = useUser ? userFile : projectDelegationRoutingPath(params.repoRoot as string);
+  const targetScope: "user" | "project" = sameFilePath(targetFile, userFile)
+    ? "user"
+    : useUser
+      ? "user"
+      : "project";
   const layers = loadDelegationRoutingLayers({
     environment,
     ...(params.repoRoot ? { repoRoot: params.repoRoot } : {}),
   });
-  const layersBelow = layers.filter((layer) => layer.file !== targetFile);
+  const layersBelow =
+    targetScope === "user"
+      ? []
+      : layers.filter((layer) => layer.scope === "user" && !sameFilePath(layer.file, targetFile));
   const current = loadDelegationRoutingConfig({
     environment,
     ...(params.repoRoot ? { repoRoot: params.repoRoot } : {}),
   });
 
   const data = (readLayerFile(targetFile) ?? {}) as Record<string, unknown>;
-  const targetProfile = params.profile?.trim() || current.profile;
-  if (params.profile !== undefined) {
-    data.profile = targetProfile;
+  const requestedEditProfile = params.editProfile?.trim() || params.profile?.trim();
+  const targetEditProfile = requestedEditProfile || current.profile;
+  if (params.defaultProfile === null) {
+    Reflect.deleteProperty(data, "profile");
+  } else if (typeof params.defaultProfile === "string") {
+    data.profile = params.defaultProfile.trim();
   }
-  if (params.routes !== undefined) {
+  if (
+    params.routes !== undefined &&
+    DELEGATION_TIERS.some((tier) => params.routes?.[tier] !== undefined)
+  ) {
     const profiles = isObject(data.profiles) ? { ...data.profiles } : {};
-    const existingProfile = isObject(profiles[targetProfile])
-      ? { ...(profiles[targetProfile] as Record<string, unknown>) }
+    const existingProfile = isObject(profiles[targetEditProfile])
+      ? { ...(profiles[targetEditProfile] as Record<string, unknown>) }
       : {};
     for (const tier of DELEGATION_TIERS) {
       const spec = params.routes[tier];
@@ -547,14 +628,29 @@ export function applyDelegationRoutingPatch(
         existingProfile[tier] = parseDelegationRouteSpec(spec);
       }
     }
-    profiles[targetProfile] = existingProfile;
+    profiles[targetEditProfile] = existingProfile;
     data.profiles = profiles;
   }
 
-  buildDelegationRoutingConfig({
-    layers: [...layersBelow, { file: targetFile, data: data as DelegationRoutingLayerData }],
-    environment,
+  const validated = buildDelegationRoutingConfig({
+    layers: [
+      ...layersBelow,
+      { file: targetFile, data: data as DelegationRoutingLayerData, scope: targetScope },
+    ],
   });
+  if (typeof params.defaultProfile === "string") {
+    const requestedDefault = params.defaultProfile.trim();
+    if (!Object.hasOwn(validated.profiles, requestedDefault)) {
+      throw invalid(
+        `Routing profile "${requestedDefault}" is not defined (known: ${Object.keys(validated.profiles).join(", ")})`,
+      );
+    }
+  }
+  if (requestedEditProfile && !Object.hasOwn(validated.profiles, requestedEditProfile)) {
+    throw invalid(
+      `Routing profile "${requestedEditProfile}" is not defined (known: ${Object.keys(validated.profiles).join(", ")})`,
+    );
+  }
 
   fs.mkdirSync(path.dirname(targetFile), { recursive: true, mode: 0o700 });
   const temporary = `${targetFile}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
@@ -566,7 +662,10 @@ export function applyDelegationRoutingPatch(
   }
 
   return readDelegationRoutingSnapshot(
-    params.repoRoot ? { repoRoot: params.repoRoot } : {},
+    {
+      ...(params.repoRoot ? { repoRoot: params.repoRoot } : {}),
+      ...(requestedEditProfile ? { profile: requestedEditProfile } : {}),
+    },
     environment,
   );
 }

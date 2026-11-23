@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import fs from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -8,11 +9,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runDelegationCli } from "../src/delegation-cli.js";
 import {
   DELEGATION_PROFILE_ENV,
+  applyDelegationRoutingPatch,
   buildDelegationRoutingConfig,
   formatDelegationRouteSpec,
   loadDelegationRoutingConfig,
   parseDelegationRouteSpec,
   projectDelegationRoutingPath,
+  readDelegationRoutingSnapshot,
+  renameSyncWithRetry,
   userDelegationRoutingPath,
   writeDelegationRoutingSetting,
 } from "../src/delegation-routing.js";
@@ -238,5 +242,308 @@ describe("tiered planner-neutral delegation routing", () => {
       action: "off",
       threadId: "t1",
     });
+  });
+
+  it("edits a single tier route without pinning top-level profile and restores automatic planner selection from a pinned file", async () => {
+    const dataDir = path.join(temporary, "data");
+    const env = { ...process.env, CODEXHOST_DATA_DIR: dataDir };
+    const userFile = userDelegationRoutingPath(env);
+
+    // Edit only codex-planner.deep via settings patch without passing defaultProfile.
+    const edited = applyDelegationRoutingPatch(
+      {
+        user: true,
+        editProfile: "codex-planner",
+        routes: { deep: "claude-code:opus@high" },
+      },
+      env,
+    );
+    expect(edited.profile).toBe("codex-planner");
+    expect(edited.configuredDefaultProfile).toBeNull();
+    expect(edited.routeSpecs).toEqual({
+      deep: "claude-code:opus@high",
+      light: "deepseek-harness",
+      review: "codex",
+    });
+
+    // Disk file contains ONLY the modified tier and NO top-level `profile`.
+    const savedJson = JSON.parse(await readFile(userFile, "utf8")) as Record<string, unknown>;
+    expect(savedJson).toEqual({
+      profiles: {
+        "codex-planner": {
+          deep: { harnessId: "claude-code", model: "opus", thinkingOptionId: "high" },
+        },
+      },
+    });
+
+    // Planner-based automatic selection still picks thread16 for claude-code and codex-planner for codex.
+    expect(
+      loadDelegationRoutingConfig({ environment: env, plannerHarnessId: "claude-code" }).profile,
+    ).toBe("thread16");
+    const codexLoaded = loadDelegationRoutingConfig({
+      environment: env,
+      plannerHarnessId: "codex",
+    });
+    expect(codexLoaded.profile).toBe("codex-planner");
+    expect(codexLoaded.routes.deep).toEqual({
+      harnessId: "claude-code",
+      model: "opus",
+      thinkingOptionId: "high",
+    });
+
+    // Simulate a previously broken user config with top-level `profile: "thread16"`.
+    await writeFile(
+      userFile,
+      `${JSON.stringify({ ...savedJson, profile: "thread16" }, null, 2)}\n`,
+    );
+    expect(readDelegationRoutingSnapshot({}, env).configuredDefaultProfile).toBe("thread16");
+    expect(
+      loadDelegationRoutingConfig({ environment: env, plannerHarnessId: "codex" }).profile,
+    ).toBe("thread16");
+
+    // Switching back to automatic (defaultProfile: null) deletes top-level `profile`.
+    const restored = applyDelegationRoutingPatch({ user: true, defaultProfile: null }, env);
+    expect(restored.configuredDefaultProfile).toBeNull();
+    const afterRestore = JSON.parse(await readFile(userFile, "utf8")) as Record<string, unknown>;
+    expect(afterRestore).not.toHaveProperty("profile");
+    expect(
+      loadDelegationRoutingConfig({ environment: env, plannerHarnessId: "codex" }).profile,
+    ).toBe("codex-planner");
+  });
+
+  it("rejects checks.shell in project config or ambiguous scope, allows user scope and unset recovery", async () => {
+    const dataDir = path.join(temporary, "data");
+    const repoRoot = path.join(temporary, "repo");
+    const env = { ...process.env, CODEXHOST_DATA_DIR: dataDir };
+    const userFile = userDelegationRoutingPath(env);
+    const projectFile = projectDelegationRoutingPath(repoRoot);
+
+    // Fail closed: writing checks.shell with neither scope nor environment (and empty layersBelow)
+    // is rejected without touching disk, even when the user routing file does not exist yet.
+    expect(() =>
+      writeDelegationRoutingSetting({
+        file: projectFile,
+        key: "checks.shell",
+        value: "/tmp/evil.sh",
+        layersBelow: [],
+      }),
+    ).toThrow(/user routing config/u);
+    expect(fs.existsSync(projectFile)).toBe(false);
+
+    // User config may set and load checks.shell when identified by environment or scope.
+    writeDelegationRoutingSetting({
+      file: userFile,
+      key: "checks.shell",
+      value: "/bin/bash",
+      environment: env,
+    });
+    expect(loadDelegationRoutingConfig({ repoRoot, environment: env }).checks.shell).toBe(
+      "/bin/bash",
+    );
+
+    // A ~/.codexhost/delegation-routing.json-style user path is allowed when scope or environment
+    // identifies it as the user file (not misclassified by its `.codexhost` directory name).
+    const dotCodexhostDir = path.join(temporary, ".codexhost");
+    const dotCodexhostUserFile = path.join(dotCodexhostDir, "delegation-routing.json");
+    writeDelegationRoutingSetting({
+      file: dotCodexhostUserFile,
+      key: "checks.shell",
+      value: "/bin/sh",
+      environment: { CODEXHOST_DATA_DIR: dotCodexhostDir },
+    });
+    expect(JSON.parse(await readFile(dotCodexhostUserFile, "utf8"))).toEqual({
+      checks: { shell: "/bin/sh" },
+    });
+
+    // Project config rejects checks.shell on set (both via explicit scope and via caller environment).
+    expect(() =>
+      writeDelegationRoutingSetting({
+        file: projectFile,
+        key: "checks.shell",
+        value: "/tmp/evil.sh",
+        scope: "project",
+      }),
+    ).toThrow(/user routing config/u);
+    expect(() =>
+      writeDelegationRoutingSetting({
+        file: projectFile,
+        key: "checks.shell",
+        value: "/tmp/evil.sh",
+        environment: env,
+      }),
+    ).toThrow(/user routing config/u);
+
+    // A legacy project file containing checks.shell fails load with remediation instructions,
+    // can be cleaned up with unset, and loads cleanly afterward.
+    await mkdir(path.dirname(projectFile), { recursive: true });
+    await writeFile(
+      projectFile,
+      JSON.stringify({ checks: { shell: "/tmp/evil.sh", timeoutMinutes: 15 } }),
+    );
+    expect(() => loadDelegationRoutingConfig({ repoRoot, environment: env })).toThrow(
+      /unset checks\.shell/u,
+    );
+
+    const cleaned = writeDelegationRoutingSetting({
+      file: projectFile,
+      key: "checks.shell",
+      unset: true,
+      scope: "project",
+    });
+    expect(cleaned.removed).toBe(true);
+    const recovered = loadDelegationRoutingConfig({ repoRoot, environment: env });
+    expect(recovered.checks).toEqual({ timeoutMinutes: 15, shell: "/bin/bash" });
+  });
+
+  it("validates user patches against user layer only, rejects unknown editProfile before disk write, and deduplicates same-file user/project paths", async () => {
+    const dataDir = path.join(temporary, "data");
+    const repoRoot = path.join(temporary, "repo");
+    const env = {
+      ...process.env,
+      CODEXHOST_DATA_DIR: dataDir,
+      [DELEGATION_PROFILE_ENV]: "thread16",
+    };
+    const userFile = userDelegationRoutingPath(env);
+    const projectFile = projectDelegationRoutingPath(repoRoot);
+
+    // Unknown defaultProfile is rejected even when CODEXHOST_DELEGATION_PROFILE is set.
+    expect(() =>
+      applyDelegationRoutingPatch({ user: true, defaultProfile: "nonexistent-profile" }, env),
+    ).toThrow(/not defined/u);
+
+    // Unknown editProfile is rejected BEFORE writing anything to disk.
+    expect(() =>
+      applyDelegationRoutingPatch(
+        { user: true, editProfile: "ghost", defaultProfile: "thread16" },
+        env,
+      ),
+    ).toThrow(/not defined/u);
+    expect(fs.existsSync(userFile)).toBe(false);
+
+    // A profile defined only in the project layer must NOT be accepted as user defaultProfile.
+    await mkdir(path.dirname(projectFile), { recursive: true });
+    await writeFile(
+      projectFile,
+      JSON.stringify({
+        profiles: {
+          "project-only": {
+            deep: { harnessId: "codex" },
+            light: { harnessId: "deepseek-harness" },
+            review: { harnessId: "claude-code" },
+          },
+        },
+      }),
+    );
+    expect(() =>
+      applyDelegationRoutingPatch(
+        { user: true, repoRoot, defaultProfile: "project-only" },
+        { ...process.env, CODEXHOST_DATA_DIR: dataDir },
+      ),
+    ).toThrow(/not defined/u);
+    expect(fs.existsSync(userFile)).toBe(false);
+
+    // When CODEXHOST_DATA_DIR points at repoRoot/.codexhost (even with different casing on Windows),
+    // the file loads once as user scope with checks.shell intact and accepts user:false patches.
+    const sameRepoRoot = path.join(temporary, "same-repo");
+    const sameProjectFile = projectDelegationRoutingPath(sameRepoRoot);
+    await mkdir(path.dirname(sameProjectFile), { recursive: true });
+    await writeFile(sameProjectFile, JSON.stringify({ checks: { shell: "/bin/bash" } }));
+    const sameDataDir =
+      process.platform === "win32"
+        ? path.join(sameRepoRoot, ".CODEXHOST")
+        : path.join(sameRepoRoot, ".", ".codexhost");
+    const sameEnv = { ...process.env, CODEXHOST_DATA_DIR: sameDataDir };
+    const loaded = loadDelegationRoutingConfig({ repoRoot: sameRepoRoot, environment: sameEnv });
+    expect(loaded.checks.shell).toBe("/bin/bash");
+    expect(loaded.sources).toHaveLength(1);
+    const patched = applyDelegationRoutingPatch(
+      {
+        user: false,
+        repoRoot: sameRepoRoot,
+        editProfile: "thread16",
+        routes: { deep: "codex" },
+      },
+      sameEnv,
+    );
+    expect(patched.routeSpecs.deep).toBe("codex");
+  });
+
+  it("blocks prototype pollution, prototype lookups, unknown-scope checks.shell, and env profile bleed during user patch", async () => {
+    const dataDir = path.join(temporary, "proto-data");
+    const repoRoot = path.join(temporary, "proto-repo");
+    const env = { ...process.env, CODEXHOST_DATA_DIR: dataDir };
+    const userFile = userDelegationRoutingPath(env);
+    const projectFile = projectDelegationRoutingPath(repoRoot);
+
+    // Reserved prototype keys cannot pollute Object.prototype or load as profiles.
+    expect(() =>
+      writeDelegationRoutingSetting({
+        file: userFile,
+        key: "profiles.__proto__.deep",
+        value: "codex",
+        scope: "user",
+      }),
+    ).toThrow(/reserved/u);
+    expect(Object.prototype).not.toHaveProperty("deep");
+
+    // Prototype method names are never mistaken for defined profiles or planner mappings.
+    expect(() => readDelegationRoutingSnapshot({ profile: "toString" }, env)).toThrow(
+      /not defined/u,
+    );
+    expect(
+      loadDelegationRoutingConfig({ environment: env, plannerHarnessId: "toString" }).profile,
+    ).toBe("thread16");
+
+    // buildDelegationRoutingConfig fails closed when checks.shell appears on a layer without scope.
+    expect(() =>
+      buildDelegationRoutingConfig({
+        layers: [{ file: projectFile, data: { checks: { shell: "/tmp/evil.sh" } } }],
+      }),
+    ).toThrow(/user routing config/u);
+
+    // User-layer patch validation is not broken when CODEXHOST_DELEGATION_PROFILE names a project-only profile.
+    await mkdir(path.dirname(projectFile), { recursive: true });
+    await writeFile(
+      projectFile,
+      JSON.stringify({
+        profiles: {
+          "team-proj": {
+            deep: { harnessId: "codex" },
+            light: { harnessId: "deepseek-harness" },
+            review: { harnessId: "claude-code" },
+          },
+        },
+      }),
+    );
+    const patched = applyDelegationRoutingPatch(
+      { user: true, repoRoot, defaultProfile: "thread16" },
+      { ...env, [DELEGATION_PROFILE_ENV]: "team-proj" },
+    );
+    expect(patched.configuredDefaultProfile).toBe("thread16");
+  });
+
+  it("waits with Atomics.wait instead of busy-spinning when renameSyncWithRetry retries", () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    let attempts = 0;
+    const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation(() => {
+      attempts += 1;
+      if (attempts < 3) {
+        const error = new Error("busy") as NodeJS.ErrnoException;
+        error.code = "EPERM";
+        throw error;
+      }
+    });
+    const waitSpy = vi.spyOn(Atomics, "wait").mockReturnValue("timed-out");
+    try {
+      renameSyncWithRetry("a.tmp", "a.json");
+      expect(renameSpy).toHaveBeenCalledTimes(3);
+      expect(waitSpy).toHaveBeenCalledTimes(2);
+      expect(waitSpy).toHaveBeenCalledWith(expect.any(Int32Array), 0, 0, 25);
+    } finally {
+      waitSpy.mockRestore();
+      renameSpy.mockRestore();
+      if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
+    }
   });
 });

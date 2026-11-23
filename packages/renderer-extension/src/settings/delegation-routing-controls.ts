@@ -51,18 +51,34 @@ export function mountDelegationRoutingControls(
   status.append(statusDot, statusText);
   header.append(status);
 
-  const profileId = preferenceId("delegation-routing-profile");
-  const profileRow = createPreferenceItem(document, {
-    title: messages.delegationRoutingProfileTitle,
-    description: messages.delegationRoutingProfileDescription,
-    controlId: profileId,
+  const defaultProfileId = preferenceId("delegation-routing-default-profile");
+  const defaultProfileRow = createPreferenceItem(document, {
+    title: messages.delegationRoutingDefaultProfileTitle,
+    description: messages.delegationRoutingDefaultProfileDescription,
+    controlId: defaultProfileId,
     help: {
       label: messages.delegationRoutingHelpLabel,
       lines: messages.delegationRoutingHelp,
     },
   });
+  const defaultProfileSelect = document.createElement("select");
+  defaultProfileSelect.id = defaultProfileId;
+  defaultProfileSelect.dataset.control = "default-profile";
+  defaultProfileSelect.setAttribute("aria-describedby", defaultProfileRow.description.id);
+  defaultProfileSelect.className =
+    "h-8 min-w-40 shrink-0 rounded-md border border-settings-border bg-settings-surface px-2.5 text-[13px] leading-5 text-settings-text outline-none transition-colors focus:border-settings-focus";
+  defaultProfileRow.item.append(defaultProfileSelect);
+  card.append(defaultProfileRow.item);
+
+  const profileId = preferenceId("delegation-routing-profile");
+  const profileRow = createPreferenceItem(document, {
+    title: messages.delegationRoutingProfileTitle,
+    description: messages.delegationRoutingProfileDescription,
+    controlId: profileId,
+  });
   const profileSelect = document.createElement("select");
   profileSelect.id = profileId;
+  profileSelect.dataset.control = "edit-profile";
   profileSelect.setAttribute("aria-describedby", profileRow.description.id);
   profileSelect.className =
     "h-8 min-w-40 shrink-0 rounded-md border border-settings-border bg-settings-surface px-2.5 text-[13px] leading-5 text-settings-text outline-none transition-colors focus:border-settings-focus";
@@ -132,8 +148,13 @@ export function mountDelegationRoutingControls(
   let disposed = false;
   let busy = false;
   let available = false;
+  let loadedDefaultProfile: string | null = null;
+  let loadedEditProfile = "";
+  let defaultDirty = false;
+  let loadedRouteSpecs: Record<DelegationTier, string> = { deep: "", light: "", review: "" };
 
   const setDisabled = (disabled: boolean): void => {
+    defaultProfileSelect.disabled = disabled;
     profileSelect.disabled = disabled;
     saveButton.disabled = disabled;
     for (const tier of DELEGATION_TIERS) tierInputs[tier].input.disabled = disabled;
@@ -166,8 +187,36 @@ export function mountDelegationRoutingControls(
     entry.input.setCustomValidity(invalid ? messages.delegationRoutingInvalidSpec : "");
   };
 
-  const applySnapshot = (snapshot: DelegationRoutingSnapshot): void => {
+  const applySnapshot = (
+    snapshot: DelegationRoutingSnapshot,
+    options: { preserveUnsavedDefault?: boolean } = {},
+  ): void => {
+    const unsavedDefaultValue =
+      options.preserveUnsavedDefault && defaultDirty ? defaultProfileSelect.value : undefined;
     available = true;
+    loadedDefaultProfile = snapshot.configuredDefaultProfile ?? null;
+    defaultProfileSelect.replaceChildren();
+    const autoOption = document.createElement("option");
+    autoOption.value = "";
+    autoOption.textContent = messages.delegationRoutingDefaultProfileAuto;
+    defaultProfileSelect.append(autoOption);
+    for (const name of snapshot.availableProfiles) {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      defaultProfileSelect.append(option);
+    }
+    if (
+      unsavedDefaultValue !== undefined &&
+      (unsavedDefaultValue === "" || snapshot.availableProfiles.includes(unsavedDefaultValue))
+    ) {
+      defaultProfileSelect.value = unsavedDefaultValue;
+      defaultDirty = (unsavedDefaultValue || null) !== loadedDefaultProfile;
+    } else {
+      defaultProfileSelect.value = loadedDefaultProfile ?? "";
+      defaultDirty = false;
+    }
+
     profileSelect.replaceChildren();
     for (const name of snapshot.availableProfiles) {
       const option = document.createElement("option");
@@ -176,6 +225,12 @@ export function mountDelegationRoutingControls(
       profileSelect.append(option);
     }
     profileSelect.value = snapshot.profile;
+    loadedEditProfile = snapshot.profile;
+    loadedRouteSpecs = {
+      deep: snapshot.routeSpecs.deep,
+      light: snapshot.routeSpecs.light,
+      review: snapshot.routeSpecs.review,
+    };
     for (const tier of DELEGATION_TIERS) {
       tierInputs[tier].input.value = snapshot.routeSpecs[tier];
       setTierInvalid(tier, false);
@@ -184,7 +239,10 @@ export function mountDelegationRoutingControls(
     setDisabled(false);
   };
 
-  const load = async (profile?: string): Promise<void> => {
+  const load = async (
+    profile?: string,
+    options: { preserveUnsavedDefault?: boolean } = {},
+  ): Promise<void> => {
     const client = getClient();
     if (!client?.getDelegationRouting) {
       available = false;
@@ -198,7 +256,7 @@ export function mountDelegationRoutingControls(
     try {
       const snapshot = await client.getDelegationRouting(profile ? { profile } : {});
       if (disposed) return;
-      applySnapshot(snapshot);
+      applySnapshot(snapshot, options);
       showStatus("applied");
     } catch (error) {
       if (disposed) return;
@@ -207,6 +265,7 @@ export function mountDelegationRoutingControls(
         setDisabled(true);
         showStatus("unavailable");
       } else {
+        if (available && loadedEditProfile) profileSelect.value = loadedEditProfile;
         setDisabled(!available);
         showStatus("failed", error instanceof Error ? error.message : undefined);
       }
@@ -223,23 +282,32 @@ export function mountDelegationRoutingControls(
       return;
     }
     let hasInvalid = false;
-    const routes: Record<DelegationTier, string> = { deep: "", light: "", review: "" };
+    const changedRoutes: Partial<Record<DelegationTier, string>> = {};
     for (const tier of DELEGATION_TIERS) {
       const value = tierInputs[tier].input.value.trim();
       const valid = validRouteSpec(value);
       setTierInvalid(tier, !valid);
       if (!valid) hasInvalid = true;
-      else routes[tier] = value;
+      else if (value !== loadedRouteSpecs[tier]) changedRoutes[tier] = value;
     }
     if (hasInvalid) return;
+    const desiredDefault = defaultProfileSelect.value ? defaultProfileSelect.value : null;
+    const defaultChanged = desiredDefault !== loadedDefaultProfile;
+    const hasRouteChanges = Object.keys(changedRoutes).length > 0;
+    if (!defaultChanged && !hasRouteChanges) {
+      showStatus("saved");
+      return;
+    }
     busy = true;
     setDisabled(true);
     showStatus("saving");
+    const editProfile = loadedEditProfile || profileSelect.value;
     try {
       const snapshot = await client.setDelegationRouting({
         user: true,
-        ...(profileSelect.value ? { profile: profileSelect.value } : {}),
-        routes,
+        ...(editProfile ? { editProfile } : {}),
+        ...(hasRouteChanges ? { routes: changedRoutes } : {}),
+        ...(defaultChanged ? { defaultProfile: desiredDefault } : {}),
       });
       if (disposed) return;
       applySnapshot(snapshot);
@@ -263,8 +331,13 @@ export function mountDelegationRoutingControls(
       }
     });
   }
+  defaultProfileSelect.addEventListener("change", () => {
+    defaultDirty = (defaultProfileSelect.value || null) !== loadedDefaultProfile;
+  });
   profileSelect.addEventListener("change", () => {
-    if (!busy && profileSelect.value) void load(profileSelect.value);
+    if (!busy && profileSelect.value) {
+      void load(profileSelect.value, { preserveUnsavedDefault: true });
+    }
   });
   saveButton.addEventListener("click", () => {
     void save();

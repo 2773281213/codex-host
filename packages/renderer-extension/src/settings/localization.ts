@@ -92,6 +92,9 @@ export interface RendererSettingsMessages {
   readonly promptCacheKeepAliveCeilingInvalid: string;
   readonly promptCacheKeepAliveHours: string;
   readonly delegationRoutingSection: string;
+  readonly delegationRoutingDefaultProfileTitle: string;
+  readonly delegationRoutingDefaultProfileDescription: string;
+  readonly delegationRoutingDefaultProfileAuto: string;
   readonly delegationRoutingProfileTitle: string;
   readonly delegationRoutingProfileDescription: string;
   readonly delegationRoutingHelpLabel: string;
@@ -395,9 +398,13 @@ const ENGLISH_MESSAGES: RendererSettingsMessages = Object.freeze({
   promptCacheKeepAliveCeilingInvalid: "Enter a whole number from 1 to 48.",
   promptCacheKeepAliveHours: "h",
   delegationRoutingSection: "Delegation routing",
-  delegationRoutingProfileTitle: "Active profile",
+  delegationRoutingDefaultProfileTitle: "Default profile",
+  delegationRoutingDefaultProfileDescription:
+    "Auto selects by planner Harness (claude-code → thread16, codex → codex-planner).",
+  delegationRoutingDefaultProfileAuto: "Auto (by planner)",
+  delegationRoutingProfileTitle: "Edit profile",
   delegationRoutingProfileDescription:
-    "Default tier mapping used when delegating with --tier deep|light|review.",
+    "Select a profile to view or edit its tier routes below without pinning the default.",
   delegationRoutingHelpLabel: "About delegation routing",
   delegationRoutingHelp: Object.freeze([
     "Map deep (complex multi-file), light (bounded mechanical), and review (read-only) tiers to Harness targets using harnessId[:model][@thinking].",
@@ -749,9 +756,12 @@ const CHINESE_MESSAGES: RendererSettingsMessages = Object.freeze({
   promptCacheKeepAliveCeilingInvalid: "请输入 1～48 之间的整数。",
   promptCacheKeepAliveHours: "小时",
   delegationRoutingSection: "委派分层路由",
-  delegationRoutingProfileTitle: "当前配置档",
-  delegationRoutingProfileDescription:
-    "使用 --tier deep|light|review 委派任务时采用的默认路由档位。",
+  delegationRoutingDefaultProfileTitle: "默认配置档",
+  delegationRoutingDefaultProfileDescription:
+    "选择“自动”时按规划者 Harness 自动选档（claude-code → thread16，codex → codex-planner）。",
+  delegationRoutingDefaultProfileAuto: "自动（按规划者）",
+  delegationRoutingProfileTitle: "编辑配置档",
+  delegationRoutingProfileDescription: "选择要查看或修改各档映射的配置档（不覆盖默认配置档）。",
   delegationRoutingHelpLabel: "委派分层路由说明",
   delegationRoutingHelp: Object.freeze([
     "将 deep（复杂多文件）、light（小范围机械修改）和 review（只读审查）档位映射到目标 Harness，格式为 harnessId[:model][@thinking]。",
