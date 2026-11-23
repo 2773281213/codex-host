@@ -3,10 +3,16 @@ import {
   configureSubagentSnapshot,
   type SubagentConfiguration,
 } from "@codexhost/harness-adapter";
-import { claudeUsageHistory, type ClaudeUsageRecord } from "./claude-usage.js";
+import {
+  claudeUsageHistory,
+  claudeUsageRecord,
+  isClaudeModelRequest,
+  type ClaudeUsageRecord,
+} from "./claude-usage.js";
 import { createClaudeUsageStatistics } from "./claude-usage-statistics.js";
 import {
   claudePromptCacheIndicators,
+  claudePromptCacheKeepAliveBlockReason,
   isColdPromptCache,
   lastClaudeAssistantResponseUnix,
 } from "./claude-prompt-cache.js";
@@ -697,6 +703,7 @@ class ClaudeHarnessSession implements HarnessSession {
   #configurationTask: Promise<void> | null = null;
   #phase: SessionPhase = "open";
   #readingHistory = false;
+  readonly #effectiveEnvironment: NodeJS.ProcessEnv;
   #state: HarnessSessionState;
   #statePublished = false;
   #unpersistedMessageIds: string[] = [];
@@ -732,6 +739,7 @@ class ClaudeHarnessSession implements HarnessSession {
     onPlanLimitObserved: (planLimit: ClaudePlanLimitEvent) => ClaudePlanLimitEvent | null,
     options: {
       environment?: NodeJS.ProcessEnv;
+      effectiveEnvironment: NodeJS.ProcessEnv;
       bypassPermissionsAvailable: boolean;
       openMode: "create" | "resume";
       sessionId: string;
@@ -765,6 +773,7 @@ class ClaudeHarnessSession implements HarnessSession {
     this.#latestUsage = this.initialUsage;
     this.#pendingSessions = options.pendingSessions;
     const environment = options.environment;
+    this.#effectiveEnvironment = options.effectiveEnvironment;
     this.#createTransport = environment
       ? (input) => dependencies.createTransport({ ...input, environment })
       : dependencies.createTransport;
@@ -828,6 +837,10 @@ class ClaudeHarnessSession implements HarnessSession {
 
   get nativeWriterRef(): NativeSessionRef {
     return this.#nativeRef;
+  }
+
+  get lastAssistantResponseAtUnix(): number | undefined {
+    return this.#lastAssistantResponseAtUnix;
   }
 
   #subagentConfiguration(): SubagentConfiguration {
@@ -1429,6 +1442,21 @@ class ClaudeHarnessSession implements HarnessSession {
         },
       };
     }
+    const sessionModel = this.#resolveSessionModelName();
+    const blockReason = claudePromptCacheKeepAliveBlockReason(
+      this.#effectiveEnvironment,
+      sessionModel,
+    );
+    if (blockReason !== null) {
+      return {
+        ok: false,
+        error: {
+          code: "unsupported",
+          message: blockReason,
+          retryable: false,
+        },
+      };
+    }
     let transport: ClaudeTurnTransport;
     try {
       transport = await this.#ensureTransport();
@@ -1452,6 +1480,21 @@ class ClaudeHarnessSession implements HarnessSession {
         },
       };
     }
+    if (
+      this.#active !== null ||
+      this.#acceptingTurn ||
+      this.#configurationTask !== null ||
+      this.#readingHistory
+    ) {
+      return {
+        ok: false,
+        error: {
+          code: "sessionBusy",
+          message: "Claude Code Session is busy",
+          retryable: true,
+        },
+      };
+    }
     if (typeof transport.refreshPromptCache !== "function") {
       return {
         ok: false,
@@ -1465,24 +1508,55 @@ class ClaudeHarnessSession implements HarnessSession {
     // Cache lifetime starts when the reading request begins, not when it completes.
     const startedAtUnix = Math.floor(Date.now() / 1000);
     try {
-      const usage = await transport.refreshPromptCache();
-      const coldCache = isColdPromptCache(usage);
-      this.#lastAssistantResponseAtUnix = startedAtUnix;
-      const composerIndicators = claudePromptCacheIndicators(
-        this.#accountCreditsSupported,
-        this.#lastAssistantResponseAtUnix,
+      const refresh = await transport.refreshPromptCache();
+      const rawUsage = refresh.usage;
+      const cacheReadInputTokens =
+        typeof rawUsage.cache_read_input_tokens === "number" &&
+        Number.isFinite(rawUsage.cache_read_input_tokens) &&
+        rawUsage.cache_read_input_tokens >= 0
+          ? rawUsage.cache_read_input_tokens
+          : 0;
+      const cacheCreationInputTokens =
+        typeof rawUsage.cache_creation_input_tokens === "number" &&
+        Number.isFinite(rawUsage.cache_creation_input_tokens) &&
+        rawUsage.cache_creation_input_tokens >= 0
+          ? rawUsage.cache_creation_input_tokens
+          : 0;
+      const inputTokens =
+        typeof rawUsage.input_tokens === "number" &&
+        Number.isFinite(rawUsage.input_tokens) &&
+        rawUsage.input_tokens >= 0
+          ? rawUsage.input_tokens
+          : undefined;
+      const outputTokens =
+        typeof rawUsage.output_tokens === "number" &&
+        Number.isFinite(rawUsage.output_tokens) &&
+        rawUsage.output_tokens >= 0
+          ? rawUsage.output_tokens
+          : undefined;
+      const coldCache = isColdPromptCache({ cacheReadInputTokens, cacheCreationInputTokens });
+      this.#lastAssistantResponseAtUnix = Math.max(
+        this.#lastAssistantResponseAtUnix ?? 0,
+        startedAtUnix,
       );
-      if (this.#phase === "open" && composerIndicators.length > 0) {
-        this.#mergeAndPublishUsage({ composerIndicators }, undefined);
+      if (this.#phase === "open") {
+        this.#meterRefreshUsage(refresh);
+        const composerIndicators = claudePromptCacheIndicators(
+          this.#accountCreditsSupported,
+          this.#lastAssistantResponseAtUnix,
+        );
+        if (composerIndicators.length > 0) {
+          this.#mergeAndPublishUsage({ composerIndicators }, undefined);
+        }
       }
       return {
         ok: true,
         value: {
           refreshedAtUnix: startedAtUnix,
-          cacheReadInputTokens: usage.cacheReadInputTokens,
-          cacheCreationInputTokens: usage.cacheCreationInputTokens,
-          ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
-          ...(usage.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
+          cacheReadInputTokens,
+          cacheCreationInputTokens,
+          ...(inputTokens !== undefined ? { inputTokens } : {}),
+          ...(outputTokens !== undefined ? { outputTokens } : {}),
           coldCache,
         },
       };
@@ -1496,6 +1570,35 @@ class ClaudeHarnessSession implements HarnessSession {
         },
       };
     }
+  }
+
+  #resolveSessionModelName(): string | undefined {
+    const ref = this.#state.effectiveModel ?? this.#requestedModel;
+    if (!ref) return undefined;
+    try {
+      return decodeClaudeModelRef(ref);
+    } catch {
+      return undefined;
+    }
+  }
+
+  #meterRefreshUsage(refresh: {
+    usage: Record<string, unknown>;
+    requestId?: string;
+    model?: string;
+  }): void {
+    const candidateModel = refresh.model ?? this.#resolveSessionModelName();
+    if (!isClaudeModelRequest(candidateModel)) return;
+    const requestId = refresh.requestId ?? `prompt-cache-keepalive:${this.#randomUUID()}`;
+    const record = claudeUsageRecord(requestId, candidateModel, refresh.usage);
+    if (
+      record.kind === "request" &&
+      record.request.inputTokens === 0 &&
+      record.request.outputTokens === 0
+    ) {
+      return;
+    }
+    this.#meterUsage(record);
   }
 
   blocksRollback(sessionId: string): boolean {
@@ -2226,7 +2329,10 @@ class ClaudeHarnessSession implements HarnessSession {
         return;
       case "message.completed": {
         if (!event.localCommand) {
-          this.#lastAssistantResponseAtUnix = Math.floor(Date.now() / 1000);
+          this.#lastAssistantResponseAtUnix = Math.max(
+            this.#lastAssistantResponseAtUnix ?? 0,
+            Math.floor(Date.now() / 1000),
+          );
           this.publishAccountCreditsSupport(this.#accountCreditsSupported);
         }
         // A continuation may complete its message without emitting text (for example
@@ -3853,6 +3959,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       (planLimit) => this.#recordPlanLimit(session, planLimit),
       {
         ...(environment ? { environment } : {}),
+        effectiveEnvironment: environment ?? this.#environment,
         bypassPermissionsAvailable,
         openMode,
         pendingSessions: this.#pendingSessions,

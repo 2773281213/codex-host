@@ -1,7 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { AppServerHost } from "./app-server-host.js";
+import { AppServerHost, type DelegationWatchObserver } from "./app-server-host.js";
 import type { DesktopExtensionBackendManager } from "./desktop-extension-backend-manager.js";
 import { SharedThreadBridge } from "./shared-thread-bridge.js";
 import type { SharedThreadOwner } from "./shared-thread-owner.js";
@@ -76,6 +76,9 @@ export function sharedHostDesktop(
     desktopExtensionBackends?: DesktopExtensionBackendManager | undefined;
     store: ExternalThreadStore;
     prices: ModelPriceCatalog;
+    delegationWatchObserver?: DelegationWatchObserver;
+    keepAlivePool?: { attach(sessionHost: AppServerHost): () => void };
+    onPromptCacheThreadDeleted?: (threadId: string) => void;
     updateCoordinator?: HostUpdateCoordinator;
     delegation(): DelegationControlRegistration | undefined;
     register(api: DelegationControlRegistration): (() => void) | undefined;
@@ -108,6 +111,12 @@ export function sharedHostDesktop(
       mappingStore: options.store,
       closeMappingStoreOnExit: false,
       modelPrices: options.prices,
+      ...(options.delegationWatchObserver
+        ? { delegationWatchObserver: options.delegationWatchObserver }
+        : {}),
+      ...(options.onPromptCacheThreadDeleted
+        ? { onPromptCacheThreadDeleted: options.onPromptCacheThreadDeleted }
+        : {}),
       sharedThreads: new SharedThreadBridge({
         connect: async () => options.owner.connect(),
         delegateCreates: true,
@@ -136,6 +145,7 @@ export function sharedHostDesktop(
   return {
     run: async () => {
       let running: Promise<number> | undefined;
+      let detachKeepAlive: (() => void) | undefined;
       try {
         if (nativeArguments) {
           await options.official.configureStartup(
@@ -145,12 +155,14 @@ export function sharedHostDesktop(
         }
         if (attachment.signal.aborted) return 0;
         host = createHost();
+        detachKeepAlive = options.keepAlivePool?.attach(host);
         options.connected.add(host);
         running = host.run();
         options.running.add(running);
         return await running;
       } finally {
         attachment.abort();
+        detachKeepAlive?.();
         if (host) options.connected.delete(host);
         if (running) options.running.delete(running);
       }

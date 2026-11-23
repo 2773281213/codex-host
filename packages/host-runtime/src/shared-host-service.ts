@@ -7,7 +7,11 @@ import { discoverHostClientChannel, isHostClientChannelOnline } from "@codexhost
 import { AppServerHost } from "./app-server-host.js";
 import { createProductionExternalThreadStore } from "./external-thread-repository.js";
 import { installedHarnessPluginOptions } from "./installed-harness-plugins.js";
-import { hasLauncherManagedUpdateRuntime, prepareDelegationRuntime } from "./run-host-runtime.js";
+import {
+  createKeepAlivePool,
+  hasLauncherManagedUpdateRuntime,
+  prepareDelegationRuntime,
+} from "./run-host-runtime.js";
 import { createHostUpdateCoordinator } from "./update-coordinator.js";
 import { prepareLocalCodex } from "./native-account-host.js";
 import { startClientChannelServer } from "./client-channel-server.js";
@@ -133,6 +137,9 @@ export async function runSharedHostService(
         const owner = new SharedThreadOwner();
         const desktops = new Set<AppServerHost>();
         const desktopRuns = new Set<Promise<number>>();
+        const keepAlivePool = createKeepAlivePool();
+        const onPromptCacheThreadDeleted = (threadId: string) =>
+          keepAlivePool.forgetThread(threadId);
         let delegation: DelegationControlRegistration | undefined;
         const installed = installedHarnessPluginOptions(hostEnvironment, false, runtimeUrl);
         const runtimePath = hostEnvironment.CODEXHOST_HOST_RUNTIME_PATH;
@@ -158,6 +165,8 @@ export async function runSharedHostService(
           accountControl: official.accountControl,
           modelPrices: prices,
           usageStatistics,
+          delegationWatchObserver: registry,
+          onPromptCacheThreadDeleted,
           ...(updateCoordinator ? { updateCoordinator } : {}),
           ...installed,
           ...(values.plugins
@@ -168,6 +177,8 @@ export async function runSharedHostService(
             return registry.register(api, { harnessCatalog: true });
           },
         });
+        const detachPrimaryKeepAlive = keepAlivePool.attach(host);
+        registry.setKeepAliveHandler(keepAlivePool.api);
         const running = host.run();
         let stopping = false;
         const stop = () => {
@@ -186,6 +197,9 @@ export async function runSharedHostService(
           desktopExtensionBackends: host.desktopExtensionBackends,
           store,
           prices,
+          delegationWatchObserver: registry,
+          keepAlivePool,
+          onPromptCacheThreadDeleted,
           ...(updateCoordinator ? { updateCoordinator } : {}),
           delegation: () => delegation,
           register: (api: DelegationControlRegistration) => registry.register(api),
@@ -248,6 +262,8 @@ export async function runSharedHostService(
           await ready("ready\n");
           return await running;
         } finally {
+          detachPrimaryKeepAlive();
+          registry.setKeepAliveHandler(undefined);
           supervisor.close();
           process.removeListener("SIGTERM", stop);
           process.removeListener("SIGINT", stop);

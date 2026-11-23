@@ -91,16 +91,36 @@ describe("Prompt cache keep-alive settings controls", () => {
     expect(checkbox).toBeTruthy();
     expect(numberInputs).toHaveLength(2);
     const [intervalInput, ceilingInput] = numberInputs as [HTMLInputElement, HTMLInputElement];
+    const intervalRow = intervalInput.closest("div.flex.min-h-\\[60px\\]") as HTMLElement;
+    const ceilingRow = ceilingInput.closest("div.flex.min-h-\\[60px\\]") as HTMLElement;
 
-    expect(checkbox.checked).toBe(true);
+    // Default keep-alive setting is disabled and hides interval/ceiling rows.
+    expect(DEFAULT_PROMPT_CACHE_KEEPALIVE_SETTINGS.enabled).toBe(false);
+    expect(checkbox.checked).toBe(false);
+    expect(intervalRow.hidden).toBe(true);
+    expect(ceilingRow.hidden).toBe(true);
     expect(intervalInput.value).toBe("55");
     expect(ceilingInput.value).toBe("8");
 
+    // Enabling reveals interval and ceiling rows and persists enabled: true.
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event("change"));
+    await flushMicrotasks();
+    expect(patches.at(-1)?.operations).toEqual([
+      {
+        kind: "promptCacheKeepAlive",
+        value: { enabled: true, intervalMinutes: 55, ceilingHours: 8 },
+      },
+    ]);
+    expect(intervalRow.hidden).toBe(false);
+    expect(ceilingRow.hidden).toBe(false);
+
+    const patchesBeforeInvalid = patches.length;
     // Reject out-of-range interval without patching Host.
     intervalInput.value = "90";
     intervalInput.dispatchEvent(new Event("change"));
     expect(intervalInput.getAttribute("aria-invalid")).toBe("true");
-    expect(patches).toHaveLength(0);
+    expect(patches).toHaveLength(patchesBeforeInvalid);
 
     // Valid interval updates Host preference.
     intervalInput.value = "45";
@@ -135,8 +155,6 @@ describe("Prompt cache keep-alive settings controls", () => {
         value: { enabled: false, intervalMinutes: 45, ceilingHours: 12 },
       },
     ]);
-    const intervalRow = intervalInput.closest("div.flex.min-h-\\[60px\\]") as HTMLElement;
-    const ceilingRow = ceilingInput.closest("div.flex.min-h-\\[60px\\]") as HTMLElement;
     expect(intervalRow.hidden).toBe(true);
     expect(ceilingRow.hidden).toBe(true);
   });

@@ -234,10 +234,10 @@ export interface ClaudeTransportContextUsage {
 }
 
 export interface ClaudePromptCacheRefreshUsage {
-  cacheReadInputTokens: number;
-  cacheCreationInputTokens: number;
-  inputTokens?: number;
-  outputTokens?: number;
+  /** Raw Anthropic usage object from the forked keep-alive response. */
+  usage: Record<string, unknown>;
+  requestId?: string;
+  model?: string;
 }
 
 export interface ClaudePlanLimitWindow {

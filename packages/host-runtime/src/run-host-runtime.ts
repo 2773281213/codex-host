@@ -5,6 +5,7 @@ import path from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
+import { DEFAULT_PROMPT_CACHE_KEEPALIVE_SETTINGS } from "@codexhost/shared-contracts";
 import { UPDATE_RUNTIME_ENV } from "@codexhost/update-manager";
 
 import { AppServerHost, officialEnvironment } from "./app-server-host.js";
@@ -41,7 +42,7 @@ import {
   type ExternalClientServer,
 } from "./external-client-server.js";
 import { installDelegationSkills } from "./delegation-skill.js";
-import type { DelegationControlRegistration } from "./delegation-types.js";
+import type { DelegationControlRegistration, PromptCacheKeepAliveApi } from "./delegation-types.js";
 import { readRemoteDelegationThread } from "./remote-delegation-read.js";
 import {
   DELEGATION_CLI_NODE_PATH_ENV,
@@ -86,6 +87,112 @@ import {
 
 const STOCK_CODEX_PATH_ENV = "CODEXHOST_STOCK_CODEX_PATH";
 export const MANAGED_REMOTE_APP_SERVER_PROCESS_TITLE = "codexhost remote app-server listener";
+
+/**
+ * Pools prompt-cache keep-alive control across a primary Host and any active
+ * per-connection sessions, replaying active pause state onto newly attached sessions.
+ */
+export function createKeepAlivePool(): {
+  api: PromptCacheKeepAliveApi;
+  attach(sessionHost: AppServerHost): () => void;
+  forgetThread(threadId: string): void;
+} {
+  const hosts = new Set<AppServerHost>();
+  let globalPaused = false;
+  const pausedThreads = new Set<string>();
+
+  const callHost = (
+    host: AppServerHost,
+    input: Parameters<PromptCacheKeepAliveApi["keepAlive"]>[0],
+  ) => {
+    const handler = host.promptCacheKeepAliveApi;
+    if (typeof handler?.keepAlive !== "function") return undefined;
+    return handler.keepAlive(input);
+  };
+
+  return {
+    attach(sessionHost: AppServerHost): () => void {
+      hosts.add(sessionHost);
+      if (globalPaused) {
+        void callHost(sessionHost, { action: "off" })?.catch(() => undefined);
+      }
+      for (const threadId of pausedThreads) {
+        void callHost(sessionHost, { action: "off", threadId })?.catch(() => undefined);
+      }
+      return () => {
+        hosts.delete(sessionHost);
+      };
+    },
+    forgetThread(threadId: string): void {
+      pausedThreads.delete(threadId);
+      for (const host of hosts) {
+        if (typeof host.forgetPromptCacheThread === "function") {
+          host.forgetPromptCacheThread(threadId);
+        }
+      }
+    },
+    api: {
+      async keepAlive(input) {
+        const request = input ?? {};
+        if (request.action === "off") {
+          if (request.threadId) {
+            pausedThreads.add(request.threadId);
+          } else {
+            globalPaused = true;
+          }
+        } else if (request.action === "on") {
+          if (request.threadId) {
+            pausedThreads.delete(request.threadId);
+          } else {
+            globalPaused = false;
+            pausedThreads.clear();
+          }
+        }
+        const pending = [...hosts]
+          .map((host) => callHost(host, request))
+          .filter((result): result is ReturnType<PromptCacheKeepAliveApi["keepAlive"]> =>
+            Boolean(result),
+          );
+        const results = await Promise.all(pending);
+        const first = results[0];
+        if (!first) {
+          return {
+            settings: { ...DEFAULT_PROMPT_CACHE_KEEPALIVE_SETTINGS },
+            globalPaused: globalPaused ? "off" : null,
+            threads: [],
+          };
+        }
+        const aggregatedGlobalPaused =
+          results.find((result) => result.globalPaused !== null)?.globalPaused ??
+          (globalPaused ? "off" : null);
+        if (results.length === 1) {
+          return { ...first, globalPaused: aggregatedGlobalPaused };
+        }
+        const byThread = new Map<string, (typeof first.threads)[number]>();
+        for (const result of results) {
+          for (const entry of result.threads) {
+            const existing = byThread.get(entry.threadId);
+            // Prefer an entry whose owning Host resolved a harnessId or recorded activity.
+            if (
+              !existing ||
+              (!existing.harnessId && entry.harnessId) ||
+              (existing.lastRequestAt === null && entry.lastRequestAt !== null)
+            ) {
+              byThread.set(entry.threadId, entry);
+            }
+          }
+        }
+        return {
+          settings: first.settings,
+          globalPaused: aggregatedGlobalPaused,
+          threads: [...byThread.values()].sort((left, right) =>
+            left.threadId.localeCompare(right.threadId),
+          ),
+        };
+      },
+    },
+  };
+}
 
 export function createRemoteOfficialAppServerPlan(
   arguments_: readonly string[],
@@ -487,6 +594,9 @@ export async function runHostRuntime(input: {
             ...(consoleOpener ? { consoleOpener } : {}),
             ...(webOpener ? { webOpener } : {}),
           };
+          const keepAlivePool = createKeepAlivePool();
+          const onPromptCacheThreadDeleted = (threadId: string) =>
+            keepAlivePool.forgetThread(threadId);
           const host = new AppServerHost({
             ...(runtimeMaintenance ? { runtimeMaintenance } : {}),
             modelPrices,
@@ -496,13 +606,17 @@ export async function runHostRuntime(input: {
             // Every Remote Control client shares this backend and Mapping Store.
             onDelegationApi: (api) => registry.register(api, { harnessCatalog: true }),
             delegationWatchObserver: registry,
+            onPromptCacheThreadDeleted,
           });
-          registry.setKeepAliveHandler(host.promptCacheKeepAliveApi);
+          keepAlivePool.attach(host);
+          registry.setKeepAliveHandler(keepAlivePool.api);
           listener = createRemoteAppServerWebSocketListener({
             socketPath: remoteControlPlan.pipePath,
             diagnosticOutput: process.stderr,
-            createSession: ({ input: desktopInput, output: desktopOutput, diagnosticOutput }) =>
-              new AppServerHost({
+            createSession: ({ input: desktopInput, output: desktopOutput, diagnosticOutput }) => {
+              let detachSession: (() => void) | undefined;
+              let unregistered = false;
+              const sessionHost = new AppServerHost({
                 ...(runtimeMaintenance ? { runtimeMaintenance } : {}),
                 modelPrices,
                 usageStatistics,
@@ -512,8 +626,22 @@ export async function runHostRuntime(input: {
                 desktopInput,
                 desktopOutput,
                 diagnosticOutput,
-                onDelegationApi: (api) => registry.register(api),
-              }),
+                onDelegationApi: (api) => {
+                  const unregister = registry.register(api);
+                  return () => {
+                    unregistered = true;
+                    detachSession?.();
+                    unregister();
+                  };
+                },
+                delegationWatchObserver: registry,
+                onPromptCacheThreadDeleted,
+              });
+              if (!unregistered) {
+                detachSession = keepAlivePool.attach(sessionHost);
+              }
+              return sessionHost;
+            },
           });
           await listener.listen();
           await publishRemoteControlAppServerDescriptor(remoteControlPlan);
@@ -524,6 +652,7 @@ export async function runHostRuntime(input: {
             delegationEnvironment,
           );
         } finally {
+          registry.setKeepAliveHandler(undefined);
           try {
             await listener?.close();
           } finally {
@@ -577,6 +706,8 @@ export async function runHostRuntime(input: {
       await mappingStore.initialize();
       const sharedOwner = new SharedThreadOwner();
       let sharedDelegation: DelegationControlRegistration | undefined;
+      const keepAlivePool = createKeepAlivePool();
+      const onPromptCacheThreadDeleted = (threadId: string) => keepAlivePool.forgetThread(threadId);
       const externalHost = new AppServerHost({
         ...(runtimeMaintenance ? { runtimeMaintenance } : {}),
         modelPrices,
@@ -603,8 +734,10 @@ export async function runHostRuntime(input: {
           return registry.register(api, { harnessCatalog: true });
         },
         delegationWatchObserver: registry,
+        onPromptCacheThreadDeleted,
       });
-      registry.setKeepAliveHandler(externalHost.promptCacheKeepAliveApi);
+      keepAlivePool.attach(externalHost);
+      registry.setKeepAliveHandler(keepAlivePool.api);
       const externalRunning = externalHost.run();
       const sharedListener = createRemoteAppServerWebSocketListener({
         socketPath: sharedThreadSocketPath(delegationEnvironment),
@@ -615,7 +748,9 @@ export async function runHostRuntime(input: {
         socketPath,
         diagnosticOutput: process.stderr,
         createSession: ({ input: desktopInput, output: desktopOutput, diagnosticOutput }) => {
-          return new AppServerHost({
+          let detachSession: (() => void) | undefined;
+          let unregistered = false;
+          const sessionHost = new AppServerHost({
             ...(runtimeMaintenance ? { runtimeMaintenance } : {}),
             modelPrices,
             usageStatistics,
@@ -638,9 +773,22 @@ export async function runHostRuntime(input: {
             closeMappingStoreOnExit: false,
             officialRuntimeScope,
             accountControl,
-            onDelegationApi: (api) => registry.register(api),
+            onDelegationApi: (api) => {
+              const unregister = registry.register(api);
+              return () => {
+                unregistered = true;
+                detachSession?.();
+                unregister();
+              };
+            },
+            delegationWatchObserver: registry,
+            onPromptCacheThreadDeleted,
             ...(updateCoordinator ? { updateCoordinator } : {}),
           });
+          if (!unregistered) {
+            detachSession = keepAlivePool.attach(sessionHost);
+          }
+          return sessionHost;
         },
       });
 
@@ -682,6 +830,7 @@ export async function runHostRuntime(input: {
         await listener.closed;
         return 0;
       } finally {
+        registry.setKeepAliveHandler(undefined);
         supervisor.close();
         process.removeListener("SIGINT", stop);
         process.removeListener("SIGTERM", stop);

@@ -297,6 +297,7 @@ export function createFixture(
     accountControl?: CodexAccountControl;
     officialRuntimeScope?: OfficialRuntimeScope;
     onDelegationApi?: (api: DelegationControlRegistration) => (() => void) | undefined;
+    delegationWatchObserver?: AppServerHostOptions["delegationWatchObserver"];
     onCreateRequestRoute?: AppServerHostOptions["onCreateRequestRoute"];
     modelPrices?: AppServerHostOptions["modelPrices"];
     usageStatistics?: AppServerHostOptions["usageStatistics"];
@@ -384,6 +385,9 @@ export function createFixture(
     ...(options.accountControl ? { accountControl: options.accountControl } : {}),
     ...(options.officialRuntimeScope ? { officialRuntimeScope: options.officialRuntimeScope } : {}),
     ...(options.onDelegationApi ? { onDelegationApi: options.onDelegationApi } : {}),
+    ...(options.delegationWatchObserver
+      ? { delegationWatchObserver: options.delegationWatchObserver }
+      : {}),
     ...(options.onCreateRequestRoute ? { onCreateRequestRoute: options.onCreateRequestRoute } : {}),
   });
   const running = host.run();

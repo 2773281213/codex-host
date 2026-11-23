@@ -19,6 +19,7 @@ import {
 import { projectClaudeAccountUsage } from "./account-usage.js";
 
 import { CLAUDE_PROMPT_CACHE_KEEPALIVE_PROMPT } from "./claude-prompt-cache.js";
+import { isClaudeModelRequest } from "./claude-usage.js";
 import { resolveClaudeCodeExecutable, withNodeRuntimeOnPath } from "./command.js";
 import {
   mergeClaudeModelPickerOptions,
@@ -730,6 +731,26 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
         pathToClaudeCodeExecutable: executable,
         permissionMode: this.#permissionMode,
         ...(this.#allowDangerouslySkipPermissions ? { allowDangerouslySkipPermissions: true } : {}),
+        // Block every tool call via PreToolUse hook so bypassPermissions, acceptEdits, or allow
+        // rules cannot execute tools during a keep-alive fork without mutating tool definitions
+        // (which would invalidate the cached prompt prefix).
+        hooks: {
+          PreToolUse: [
+            {
+              hooks: [
+                async () => ({
+                  continue: false,
+                  hookSpecificOutput: {
+                    hookEventName: "PreToolUse" as const,
+                    permissionDecision: "deny" as const,
+                    permissionDecisionReason:
+                      "Tool execution is disabled during prompt-cache keep-alive",
+                  },
+                }),
+              ],
+            },
+          ],
+        },
         canUseTool: async (_toolName, _input, options) =>
           denied(options.toolUseID, "Tool execution is disabled during prompt-cache keep-alive"),
         includePartialMessages: false,
@@ -758,8 +779,23 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
       return await Promise.race([
         (async () => {
           let resultMessage: Record<string, unknown> | null = null;
+          let assistantMessageId: string | undefined;
+          let assistantModel: string | undefined;
+          let assistantUsage: Record<string, unknown> | undefined;
           for await (const message of ephemeralQuery) {
-            if (isRecord(message) && message.type === "result") {
+            if (!isRecord(message)) continue;
+            if (message.type === "assistant" && isRecord(message.message)) {
+              const candidateModel = message.message.model;
+              if (isClaudeModelRequest(candidateModel)) {
+                assistantModel = candidateModel;
+                if (typeof message.message.id === "string" && message.message.id.length > 0) {
+                  assistantMessageId = message.message.id;
+                }
+                if (isRecord(message.message.usage)) {
+                  assistantUsage = message.message.usage;
+                }
+              }
+            } else if (message.type === "result") {
               resultMessage = message;
             }
           }
@@ -771,30 +807,31 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
               typeof resultMessage.subtype === "string" ? resultMessage.subtype : "error";
             throw new Error(`Claude SDK prompt-cache keep-alive failed (${detail})`);
           }
-          const usage = isRecord(resultMessage.usage) ? resultMessage.usage : {};
-          const cacheReadInputTokens =
-            typeof usage.cache_read_input_tokens === "number" &&
-            Number.isFinite(usage.cache_read_input_tokens)
-              ? usage.cache_read_input_tokens
-              : 0;
-          const cacheCreationInputTokens =
-            typeof usage.cache_creation_input_tokens === "number" &&
-            Number.isFinite(usage.cache_creation_input_tokens)
-              ? usage.cache_creation_input_tokens
-              : 0;
-          const inputTokens =
-            typeof usage.input_tokens === "number" && Number.isFinite(usage.input_tokens)
-              ? usage.input_tokens
-              : undefined;
-          const outputTokens =
-            typeof usage.output_tokens === "number" && Number.isFinite(usage.output_tokens)
-              ? usage.output_tokens
-              : undefined;
+          const rawUsage: Record<string, unknown> = isRecord(resultMessage.usage)
+            ? {
+                ...resultMessage.usage,
+                ...(isRecord(assistantUsage?.cache_creation) &&
+                !isRecord(resultMessage.usage.cache_creation)
+                  ? { cache_creation: assistantUsage.cache_creation }
+                  : {}),
+              }
+            : (assistantUsage ?? {});
+          const resultModel = isRecord(resultMessage.modelUsage)
+            ? Object.keys(resultMessage.modelUsage).find(isClaudeModelRequest)
+            : undefined;
+          const model =
+            assistantModel ??
+            resultModel ??
+            (isClaudeModelRequest(this.#currentModel) ? this.#currentModel : undefined);
+          const requestId =
+            assistantMessageId ??
+            (typeof resultMessage.uuid === "string" && resultMessage.uuid.length > 0
+              ? resultMessage.uuid
+              : undefined);
           return {
-            cacheReadInputTokens,
-            cacheCreationInputTokens,
-            ...(inputTokens !== undefined ? { inputTokens } : {}),
-            ...(outputTokens !== undefined ? { outputTokens } : {}),
+            usage: rawUsage,
+            ...(requestId !== undefined ? { requestId } : {}),
+            ...(model !== undefined ? { model } : {}),
           };
         })(),
         timeout.promise,

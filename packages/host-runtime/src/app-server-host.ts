@@ -442,15 +442,19 @@ export interface AppServerHostOptions {
   webOpener?: HostWebOpener;
   onDelegationApi?: (api: DelegationControlRegistration) => (() => void) | undefined;
   /** Optional observer of active delegation watches, used to protect waiting planners and keep prompt caches warm. */
-  delegationWatchObserver?: {
-    activeWatchCountsBySubscriber(): ReadonlyMap<string, number>;
-    hasActiveWatchesFor(notifyThreadId: string): boolean;
-    onWatchesChanged(listener: () => void): () => void;
-  };
+  delegationWatchObserver?: DelegationWatchObserver;
+  /** Notifies a shared keep-alive pool when an external Thread is permanently deleted. */
+  onPromptCacheThreadDeleted?: (threadId: string) => void;
   /** Shared by all Hosts of one runtime; defaults to the bundled snapshot only. */
   modelPrices?: ModelPriceCatalog;
   /** Machine-wide usage statistics; one per runtime, read from the loaded Harness plugins. */
   usageStatistics?: UsageStatistics;
+}
+
+export interface DelegationWatchObserver {
+  activeWatchCountsBySubscriber(): ReadonlyMap<string, number>;
+  hasActiveWatchesFor(notifyThreadId: string): boolean;
+  onWatchesChanged(listener: () => void): () => void;
 }
 
 interface TurnProjectionGate {
@@ -1165,7 +1169,10 @@ export class AppServerHost {
       hasRunningDescendants: (threadId) => this.#hasRunningSubagents(threadId),
       idleRelease: {
         queue: this.#desktopRequests,
-        onClosed: (thread) => this.#resolveThreadInteractions(thread),
+        onClosed: async (thread) => {
+          this.#promptCacheKeepAlive.forget(thread.id, { preserveUserPause: true });
+          await this.#resolveThreadInteractions(thread);
+        },
         canRelease: (thread) =>
           !this.#options.delegationWatchObserver?.hasActiveWatchesFor(thread.id) &&
           !this.#hasRunningSubagents(thread.id) &&
@@ -1200,6 +1207,7 @@ export class AppServerHost {
             thread.activeTurnId !== null ||
             this.#externalSteering.hasPending(thread.id),
           canRefresh: typeof refresh === "function",
+          lastResponseAtMs: this.#sessionLastAssistantResponseAtMs(thread),
           refreshPromptCache: () =>
             this.#externalRuntime.idleRelease.runOperation(thread.id, async () => {
               if (typeof thread.session.refreshPromptCache !== "function") {
@@ -1327,7 +1335,6 @@ export class AppServerHost {
       hasRunningSubagents: (parentThreadId) => this.#hasRunningSubagents(parentThreadId),
       publishExternalQueue: (threadId) => this.#publishExternalQueue(threadId),
       startNextQueuedExternalTurn: (thread) => this.#startNextQueuedExternalTurn(thread),
-      onTurnStarted: (thread) => this.#promptCacheKeepAlive.recordRequest(thread.id),
       onCompaction: (thread, trigger) =>
         this.#promptCacheKeepAlive.recordCompaction(thread.id, trigger),
     });
@@ -1554,6 +1561,11 @@ export class AppServerHost {
     };
   }
 
+  /** Drops keep-alive state for a deleted Thread on this Host instance. */
+  forgetPromptCacheThread(threadId: string): void {
+    this.#promptCacheKeepAlive.forget(threadId);
+  }
+
   #applyHarnessPreferences(snapshot: HarnessPreferenceSnapshot): void {
     if (snapshot.scope !== "external" || snapshot.revision < this.#appliedPreferenceRevision)
       return;
@@ -1608,6 +1620,9 @@ export class AppServerHost {
       await this.#closeAdapters();
       this.#unregisterDelegationApi?.();
       this.#unregisterDelegationApi = undefined;
+      this.#unsubscribeKeepAliveWatches?.();
+      this.#unsubscribeKeepAliveWatches = undefined;
+      this.#promptCacheKeepAlive.stop();
       this.#unsubscribeOfficialState?.();
       this.#unsubscribeOfficialState = undefined;
       if (this.#options.closeMappingStoreOnExit !== false) {
@@ -2094,6 +2109,7 @@ export class AppServerHost {
         // Settings requests from Web clients; the shared service owns these handlers too.
         request.method.startsWith("codexhost/account/") ||
         request.method.startsWith("codexhost/update/") ||
+        request.method.startsWith("codexhost/delegation/routing/") ||
         isModelPriceOverridesMethod(request.method)
       )
     ) {
@@ -2121,6 +2137,8 @@ export class AppServerHost {
             await this.#repository.removeThread(thread.id);
             this.#externalRuntime.remove(thread.id);
             this.#routeObservationTracker.forgetThread(thread.id);
+            this.#promptCacheKeepAlive.forget(thread.id);
+            this.#options.onPromptCacheThreadDeleted?.(thread.id);
           },
         });
         await this.#writer.json(rpcEnvelope(request, { result: { discarded } }));
@@ -5004,6 +5022,8 @@ export class AppServerHost {
       } catch {
         this.#externalRuntime.remove(record.hostThreadId);
         this.#routeObservationTracker.forgetThread(record.hostThreadId);
+        this.#promptCacheKeepAlive.forget(record.hostThreadId);
+        this.#options.onPromptCacheThreadDeleted?.(record.hostThreadId);
         await session.close().catch(() => undefined);
         await this.#repository.removeProvisional(record.hostThreadId).catch(() => undefined);
         await this.#writer.json(
@@ -5270,6 +5290,8 @@ export class AppServerHost {
     }
     if (location.thread) await this.#resolveThreadInteractions(location.thread);
     this.#routeObservationTracker.forgetThread(location.record.hostThreadId);
+    this.#promptCacheKeepAlive.forget(location.record.hostThreadId);
+    this.#options.onPromptCacheThreadDeleted?.(location.record.hostThreadId);
     this.#externalQueue.clear(location.record.hostThreadId);
     this.#queuedTurnStarts.delete(location.record.hostThreadId);
     await this.#writer.json(rpcEnvelope(request, { result: {} }));
@@ -6654,6 +6676,9 @@ export class AppServerHost {
       return;
     }
 
+    const wasEphemeralTurn =
+      event.type === "turn.completed" &&
+      (event.ephemeral === true || thread.ephemeralTurnIds.has(event.turnId));
     if (event.type === "turn.completed") {
       await this.#questions.closeWhere(
         (request) => request.threadId === thread.id && request.turnId === event.turnId,
@@ -6666,6 +6691,27 @@ export class AppServerHost {
       );
     }
     await this.#turnProjection.project(thread, event);
+    if (event.type === "turn.completed" && !wasEphemeralTurn) {
+      this.#promptCacheKeepAlive.recordRequest(
+        thread.id,
+        this.#sessionLastAssistantResponseAtMs(thread) ?? Date.now(),
+      );
+    }
+  }
+
+  /**
+   * Returns the adapter-reported timestamp (Unix ms) of the last real assistant response,
+   * preferring the session's native timestamp and falling back to the prompt-cache countdown.
+   */
+  #sessionLastAssistantResponseAtMs(thread: ExternalThread): number | null {
+    const raw = (thread.session as { lastAssistantResponseAtUnix?: unknown })
+      .lastAssistantResponseAtUnix;
+    if (typeof raw === "number" && Number.isFinite(raw)) return raw * 1000;
+    const indicator = thread.latestUsage?.composerIndicators?.find(
+      (item) => item.id === "prompt-cache",
+    );
+    if (indicator) return (indicator.expiresAtUnix - 3600) * 1000;
+    return null;
   }
 
   async #materializeSubagent(

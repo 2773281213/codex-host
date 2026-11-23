@@ -26,7 +26,7 @@ export type PromptCacheKeepAliveSettings = z.infer<typeof promptCacheKeepAliveSe
 
 export const DEFAULT_PROMPT_CACHE_KEEPALIVE_SETTINGS: Readonly<PromptCacheKeepAliveSettings> =
   Object.freeze({
-    enabled: true,
+    enabled: false,
     intervalMinutes: PROMPT_CACHE_KEEPALIVE_INTERVAL_MINUTES_DEFAULT,
     ceilingHours: PROMPT_CACHE_KEEPALIVE_CEILING_HOURS_DEFAULT,
   });
